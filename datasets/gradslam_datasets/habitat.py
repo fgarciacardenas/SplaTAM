@@ -69,9 +69,9 @@ class HabitatDataset(GradSLAMDataset):
     def pose_matrix_from_quaternion(self, pvec):
         """ convert 4x4 pose matrix to (t, q) """
         from scipy.spatial.transform import Rotation
-
+        cam2optical = Rotation.from_euler("ZYX", [-np.pi / 2.0, 0.0, -np.pi / 2.0])
         pose = np.eye(4)
-        pose[:3, :3] = Rotation.from_quat(pvec[3:]).as_matrix()
+        pose[:3, :3] = (Rotation.from_quat(pvec[3:]) * cam2optical).as_matrix()
         pose[:3, 3] = pvec[:3]
         return pose
 
