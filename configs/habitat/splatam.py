@@ -3,7 +3,7 @@ from os.path import join as p_join
 
 primary_device = "cuda:0"
 
-scenes = ["seq2"]
+scenes = ["seq3"]
 
 seed = int(0)
 scene_name = scenes[int(0)]
@@ -48,7 +48,7 @@ config = dict(
     data=dict(
         basedir="/home/dev/data",
         gradslam_data_cfg=f"./configs/data/habitat.yaml",
-        sequence=f"seq2",
+        sequence=f"seq3",
         desired_image_height=480,
         desired_image_width=640,
         start=0,
