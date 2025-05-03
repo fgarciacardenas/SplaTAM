@@ -700,6 +700,11 @@ def rgbd_slam(config: dict):
     print("Initializing SLAM...")
     time_idx = checkpoint_time_idx
     while not rospy.is_shutdown():
+        # Exit if node finished flag is triggered
+        if ros_handler.finished:
+            num_frames = time_idx
+            break
+        
         # Block until ROS trigger fires
         if not ros_handler.triggered:
             rospy.sleep(0.01)
@@ -1014,6 +1019,11 @@ def rgbd_slam(config: dict):
 
         torch.cuda.empty_cache()
 
+    # Exit condition
+    if rospy.is_shutdown():
+        print("ROS Node Shutdown")
+        exit(1)
+
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
         tracking_iter_time_count = 1
@@ -1073,6 +1083,7 @@ class RosSubscriberHandler:
         self.latest_rgb   = None  # dict with ts, arr, enc
         self.latest_depth = None  # dict with ts, arr, enc
         self.triggered    = False
+        self.finished     = False
 
         self.fx = config_dict["camera_params"]["fx"]
         self.fy = config_dict["camera_params"]["fy"]
@@ -1097,6 +1108,9 @@ class RosSubscriberHandler:
         rospy.Subscriber(
             '/ifpp/trigger_signal', Bool,
             self._trigger_cb,queue_size=1)
+        rospy.Subscriber(
+            '/ifpp/finished_signal', Bool,
+            self._finished_cb,queue_size=1)
 
         # GUI windows
         cv2.namedWindow('RGB',   cv2.WINDOW_NORMAL)
@@ -1145,6 +1159,10 @@ class RosSubscriberHandler:
     def _trigger_cb(self, msg: Bool):
         if msg.data:
             self.triggered = True
+
+    def _finished_cb(self, msg: Bool):
+        if msg.data:
+            self.finished = True
 
     def pose_matrix_from_quaternion(self, pvec):
         """ convert 4x4 pose matrix to (t, q) """
