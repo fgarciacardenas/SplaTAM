@@ -4,6 +4,7 @@ import shutil
 import sys
 import time
 from importlib.machinery import SourceFileLoader
+import threading
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -41,8 +42,10 @@ import rospy
 # ros_numpy patch for Python 3.10+
 np.float = float
 import ros_numpy
-from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
+from sensor_msgs.msg import Image
+from nav_msgs.msg import Odometry
+RGBD_VIZ = True
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -563,7 +566,10 @@ def rgbd_slam(config: dict):
 
     # Initialize ROS Node
     ros_handler = RosSubscriberHandler(gradslam_data_cfg)
-    ros_handler.spin()
+    # Optional: Visualize the RGBD data
+    if RGBD_VIZ:
+        spin_thread = threading.Thread(target=ros_handler.spin, daemon=True)
+        spin_thread.start()
 
     # Init seperate dataloader for densification if required
     if seperate_densification_res:
@@ -691,6 +697,7 @@ def rgbd_slam(config: dict):
         checkpoint_time_idx = 0
 
     # Iterate over Scan
+    print("Initializing SLAM...")
     time_idx = checkpoint_time_idx
     while not rospy.is_shutdown():
         # Block until ROS trigger fires
@@ -706,6 +713,7 @@ def rgbd_slam(config: dict):
 
         # Increment current index
         time_idx += 1
+        print("Adding Frame to Gaussian Splat %d" % time_idx)
 
         # Load RGBD frames incrementally instead of all frames
         color, depth, intrinsics, gt_pose = ros_data
@@ -1073,7 +1081,7 @@ class RosSubscriberHandler:
 
         K = torch.from_numpy(self.as_intrinsics_matrix([self.fx, self.fy, self.cx, self.cy]))
         #K = datautils.scale_intrinsics(K, self.height_downsample_ratio, self.width_downsample_ratio)
-        self.intrinsics = torch.eye(4).to(K)
+        self.intrinsics = torch.eye(4).to(K).type(torch.float)
         self.intrinsics[:3, :3] = K
 
         # Set up ROS subscribers
@@ -1083,6 +1091,9 @@ class RosSubscriberHandler:
         rospy.Subscriber(
             '/ifpp_camera/depth/depth_registered', Image,
             self._depth_cb, queue_size=1)
+        rospy.Subscriber(
+            '/odometry', Odometry,
+            self._pose_cb,queue_size=1)
         rospy.Subscriber(
             '/ifpp/trigger_signal', Bool,
             self._trigger_cb,queue_size=1)
@@ -1111,8 +1122,8 @@ class RosSubscriberHandler:
         arr = ros_numpy.numpify(msg)
         # store with encoding
         self.latest_rgb = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
-        rospy.loginfo(f"[RGB cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
-                      f" min={arr.min()} max={arr.max()}")
+        # rospy.loginfo(f"[RGB cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
+        #               f" min={arr.min()} max={arr.max()}")
 
     def _depth_cb(self, msg: Image):
         ts = self._ts_ns(msg.header)
@@ -1121,12 +1132,28 @@ class RosSubscriberHandler:
         if arr.dtype in (np.float32, np.float64):
             arr = (arr * 1000).astype(np.uint16)
         self.latest_depth = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
-        rospy.loginfo(f"[Depth cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
-                      f" min={arr.min()} max={arr.max()}")
+        # rospy.loginfo(f"[Depth cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
+        #               f" min={arr.min()} max={arr.max()}")
+
+    def _pose_cb(self, msg: Odometry):
+        ts = self._ts_ns(msg.header)
+        pos = msg.pose.pose.position
+        ori = msg.pose.pose.orientation
+        self.latest_pose = {'ts': ts, 'arr': [pos.x, pos.y, pos.z, ori.x, ori.y, ori.z, ori.w]}
+        # rospy.loginfo(f"[Pose cb] ts={ts} pos=({pos.x}, {pos.y}, {pos.z})")
 
     def _trigger_cb(self, msg: Bool):
         if msg.data:
             self.triggered = True
+
+    def pose_matrix_from_quaternion(self, pvec):
+        """ convert 4x4 pose matrix to (t, q) """
+        from scipy.spatial.transform import Rotation
+        cam2optical = Rotation.from_euler("ZYX", [-np.pi / 2.0, 0.0, -np.pi / 2.0])
+        pose = np.eye(4)
+        pose[:3, :3] = (Rotation.from_quat(pvec[3:]) * cam2optical).as_matrix()
+        pose[:3, 3] = pvec[:3]
+        return pose
 
     def get_current_data(self):
         """
@@ -1142,17 +1169,18 @@ class RosSubscriberHandler:
             return None
 
         # unpack what you stored
-        rgb = self.latest_rgb['arr']      # numpy H×W×3, uint8 or float
-        dep = self.latest_depth['arr']    # numpy H×W, uint16 or float
+        rgb = self.latest_rgb['arr'] # HxWx3
+        dep = np.expand_dims(self.latest_depth['arr'], axis=2) # HxWx1
+
+        # compute pose matrix
+        pose = self.pose_matrix_from_quaternion(self.latest_pose['arr'])
+        pose = torch.from_numpy(pose).type(torch.float).cuda()
 
         # to torch C×H×W
-        color = torch.from_numpy(rgb.astype(np.float32) / 255.0)\
-                     .permute(2,0,1)\
-                     .unsqueeze(0).cuda()
-        depth = torch.from_numpy(dep.astype(np.float32)/1000.0)\
-                     .unsqueeze(0).unsqueeze(0).cuda()
+        color = torch.from_numpy(rgb).type(torch.float).cuda()
+        depth = torch.from_numpy(dep).type(torch.float).cuda()
 
-        return color, depth, self.intrinsics, self.latest_pose['mat']
+        return color, depth, self.intrinsics, pose
 
     def spin(self):
         # Set ROS node rate
@@ -1168,8 +1196,8 @@ class RosSubscriberHandler:
                         d = self.latest_rgb
                         arr = d['arr']
                         enc = d['enc']
-                        rospy.loginfo(f"[RGB dbg] enc={enc} shape={arr.shape}"
-                                    f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
+                        # rospy.loginfo(f"[RGB dbg] enc={enc} shape={arr.shape}"
+                        #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
                         disp = arr
                         # normalize floats
                         if disp.dtype in (np.float32, np.float64):
@@ -1190,8 +1218,8 @@ class RosSubscriberHandler:
                         d = self.latest_depth
                         arr = d['arr']
                         enc = d['enc']
-                        rospy.loginfo(f"[Depth dbg] enc={enc} shape={arr.shape}"
-                                    f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
+                        # rospy.loginfo(f"[Depth dbg] enc={enc} shape={arr.shape}"
+                        #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
                         disp = arr.astype(np.float32)
                         if disp.max() > 0:
                             disp = (disp / disp.max() * 255).astype(np.uint8)
