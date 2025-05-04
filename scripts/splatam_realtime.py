@@ -47,8 +47,11 @@ from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
 from scipy.spatial.transform import Rotation
 import collections
-RGBD_VIZ = False
+
+# Control flags
 VERBOSE = False
+RGBD_VIZ = False
+DUMP_DATA = False
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -1032,6 +1035,9 @@ def rgbd_slam(config: dict):
         # Collect new data
         ros_handler.map_ready = True
 
+    if DUMP_DATA:
+        dump_realtime_dataset(dataset, '/home/dev/frame_rt')
+
     # Exit condition
     if rospy.is_shutdown():
         print("ROS Node Shutdown")
@@ -1292,6 +1298,32 @@ class RosSubscriberHandler:
                 rospy.logwarn("No Depth data yet.")
         
         cv2.waitKey(1)
+
+
+def dump_realtime_dataset(dataset, out_dir):
+    """
+    Given `dataset` as an iterable of (color, depth, intrinsics, gt_pose) tensors,
+    write each item to out_dir/frame_00000.npz, frame_00001.npz, etc.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    for idx, (color, depth, K, pose) in enumerate(dataset):
+        # move to CPU + numpy
+        color_np = color.cpu().numpy()
+        depth_np = depth.cpu().numpy()
+        K_np    = K.cpu().numpy()[:3, :3]
+        pose_np = pose.cpu().numpy()
+
+        fname = os.path.join(out_dir, f"frame_{idx:05d}.npz")
+        np.savez(
+            fname,
+            color=color_np,
+            depth=depth_np,
+            intrinsics=K_np,
+            gt_pose=pose_np
+        )
+        # (optionally) print progress every N frames:
+        if idx % 100 == 0:
+            print(f"  dumped {idx} --> {fname}")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,9 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
+# Control flags
+DUMP_DATA = False
+
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["icl"]:
@@ -641,6 +644,9 @@ def rgbd_slam(config: dict):
     else:
         checkpoint_time_idx = 0
     
+    if DUMP_DATA:
+        dump_realtime_dataset(dataset, '/home/dev/frame_gt/')
+
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
         # Load RGBD frames incrementally instead of all frames
@@ -990,6 +996,33 @@ def rgbd_slam(config: dict):
     # Close WandB Run
     if config['use_wandb']:
         wandb.finish()
+
+
+def dump_realtime_dataset(dataset, out_dir):
+    """
+    Given `dataset` as an iterable of (color, depth, intrinsics, gt_pose) tensors,
+    write each item to out_dir/frame_00000.npz, frame_00001.npz, etc.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    for idx, (color, depth, K, pose) in enumerate(dataset):
+        # move to CPU + numpy
+        color_np = color.cpu().numpy()
+        depth_np = depth.cpu().numpy()
+        K_np    = K.cpu().numpy()[:3, :3]
+        pose_np = pose.cpu().numpy()
+
+        fname = os.path.join(out_dir, f"frame_{idx:05d}.npz")
+        np.savez(
+            fname,
+            color=color_np,
+            depth=depth_np,
+            intrinsics=K_np,
+            gt_pose=pose_np
+        )
+        # (optionally) print progress every N frames:
+        if idx % 100 == 0:
+            print(f"  dumped {idx} --> {fname}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
