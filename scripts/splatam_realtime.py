@@ -45,6 +45,8 @@ import ros_numpy
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
+from scipy.spatial.transform import Rotation
+import collections
 RGBD_VIZ = False
 VERBOSE = False
 
@@ -711,9 +713,9 @@ def rgbd_slam(config: dict):
             break
         
         # Block until ROS trigger fires
-        if not ros_handler.triggered:
-            rospy.sleep(0.01)
-            continue
+        # if not ros_handler.triggered:
+        #     rospy.sleep(0.01)
+        #     continue
 
         # Get new data sample
         ros_data = ros_handler.get_current_data()
@@ -1097,12 +1099,18 @@ def rgbd_slam(config: dict):
         wandb.finish()
 
 class RosSubscriberHandler:
-    def __init__(self, config_dict):
-        # storage for latest messages
-        self.latest_rgb   = None  # dict with ts, arr, enc
-        self.latest_depth = None  # dict with ts, arr, enc
-        self.latest_pose  = None  # dict with ts, arr
-        self.initial_pose = None  # arr
+    def __init__(self, config_dict, max_queue_size=5, max_dt=0.08):
+        # Parameters
+        self.max_dt = max_dt
+        self.max_queue_size = max_queue_size
+        self.pose_scale = 10.0
+
+        # Queues for synchronization
+        self.rgb_queue   = collections.deque(maxlen=max_queue_size)
+        self.depth_queue = collections.deque(maxlen=max_queue_size)
+        self.pose_queue  = collections.deque(maxlen=max_queue_size)
+
+        self.initial_pose = None
         self.triggered    = False
         self.finished     = False
         self.map_ready    = True
@@ -1119,78 +1127,56 @@ class RosSubscriberHandler:
         self.intrinsics[:3, :3] = K
 
         # Set up ROS subscribers
-        rospy.Subscriber(
-            '/ifpp_camera/rgb/image_rect_color', Image,
-            self._rgb_cb,   queue_size=1)
-        rospy.Subscriber(
-            '/ifpp_camera/depth/depth_registered', Image,
-            self._depth_cb, queue_size=1)
-        rospy.Subscriber(
-            '/odometry', Odometry,
-            self._pose_cb,queue_size=1)
-        rospy.Subscriber(
-            '/ifpp/trigger_signal', Bool,
-            self._trigger_cb,queue_size=1)
-        rospy.Subscriber(
-            '/ifpp/finished_signal', Bool,
-            self._finished_cb,queue_size=1)
-
+        rospy.Subscriber('/ifpp_camera/rgb/image_rect_color', Image,
+                         self._rgb_cb, queue_size=1)
+        rospy.Subscriber('/ifpp_camera/depth/depth_registered', Image,
+                         self._depth_cb, queue_size=1)
+        rospy.Subscriber('/odometry', Odometry,
+                         self._pose_cb, queue_size=1)
+        rospy.Subscriber('/ifpp/trigger_signal', Bool,
+                         self._trigger_cb, queue_size=1)
+        rospy.Subscriber('/ifpp/finished_signal', Bool,
+                         self._finished_cb, queue_size=1)
+        
         # GUI windows
         if RGBD_VIZ:
             cv2.namedWindow('RGB',   cv2.WINDOW_NORMAL)
             cv2.namedWindow('Depth', cv2.WINDOW_NORMAL)
 
     def as_intrinsics_matrix(self, intrinsics):
-        """
-        Get matrix representation of intrinsics.
-
-        """
         K = np.eye(3)
-        K[0, 0] = intrinsics[0]
-        K[1, 1] = intrinsics[1]
-        K[0, 2] = intrinsics[2]
-        K[1, 2] = intrinsics[3]
+        K[0, 0], K[1, 1] = intrinsics[0], intrinsics[1]
+        K[0, 2], K[1, 2] = intrinsics[2], intrinsics[3]
         return K
 
     def _ts_ns(self, header):
-        return int(header.stamp.secs) * 1_000_000_000 + int(header.stamp.nsecs)
+        return int(header.stamp.secs)*1_000_000_000 + int(header.stamp.nsecs)
 
     def _rgb_cb(self, msg: Image):
-        if self.map_ready:
-            ts = self._ts_ns(msg.header)
-            arr = ros_numpy.numpify(msg)
-            # store with encoding
-            self.latest_rgb = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
-            if VERBOSE:
-                rospy.loginfo(f"[RGB cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
-                            f" min={arr.min()} max={arr.max()}")
+        if not self.map_ready: return
+        ts = self._ts_ns(msg.header)
+        arr = ros_numpy.numpify(msg)
+        self.rgb_queue.append({'ts': ts, 'arr': arr, 'enc': msg.encoding})
 
     def _depth_cb(self, msg: Image):
-        if self.map_ready:
-            ts = self._ts_ns(msg.header)
-            arr = ros_numpy.numpify(msg)
-            # scale float to uint16 if needed
-            if arr.dtype in (np.float32, np.float64):
-                arr = (arr * 1000).astype(np.uint16)
-            self.latest_depth = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
-            if VERBOSE:
-                rospy.loginfo(f"[Depth cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
-                              f" min={arr.min()} max={arr.max()}")
+        if not self.map_ready: return
+        ts = self._ts_ns(msg.header)
+        arr = ros_numpy.numpify(msg)
+        if arr.dtype in (np.float32, np.float64):
+            arr = (arr * 1000).astype(np.uint16)
+        self.depth_queue.append({'ts': ts, 'arr': arr, 'enc': msg.encoding})
 
     def _pose_cb(self, msg: Odometry):
-        if self.map_ready:
-            ts = self._ts_ns(msg.header)
-            scale = 10.0
-            pos = msg.pose.pose.position
-            ori = msg.pose.pose.orientation
-            self.latest_pose = {'ts': ts, 'arr': [pos.x / scale, pos.y / scale, pos.z / scale, 
-                                                  ori.x, ori.y, ori.z, ori.w]}
-            
-            if self.initial_pose is None:
-                pose = self.pose_matrix_from_quaternion(self.latest_pose['arr'])
-                self.initial_pose = torch.from_numpy(pose).type(torch.float).cuda()
-            if VERBOSE:
-                rospy.loginfo(f"[Pose cb] ts={ts} pos=({pos.x}, {pos.y}, {pos.z})")
+        if not self.map_ready: return
+        ts = self._ts_ns(msg.header)
+        pos = msg.pose.pose.position
+        ori = msg.pose.pose.orientation
+        arr = [pos.x/self.pose_scale, pos.y/self.pose_scale, pos.z/self.pose_scale,
+               ori.x, ori.y, ori.z, ori.w]
+        self.pose_queue.append({'ts': ts, 'arr': arr})
+        if self.initial_pose is None:
+            mat = self.pose_matrix_from_quaternion(arr)
+            self.initial_pose = torch.from_numpy(mat).float().cuda()
 
     def _trigger_cb(self, msg: Bool):
         if msg.data:
@@ -1200,57 +1186,70 @@ class RosSubscriberHandler:
         if msg.data:
             self.finished = True
 
-    def pose_matrix_from_quaternion(self, pvec):
-        """ convert 4x4 pose matrix to (t, q) """
-        from scipy.spatial.transform import Rotation
-        cam2optical = Rotation.from_euler("ZYX", [-np.pi / 2.0, 0.0, -np.pi / 2.0])
-        pose = np.eye(4)
-        pose[:3, :3] = (Rotation.from_quat(pvec[3:]) * cam2optical).as_matrix()
-        pose[:3, 3] = pvec[:3]
-        return pose
+    def associate_frames(self, t_rgb, t_depth, t_pose):
+        matches = []
+        for i, tr in enumerate(t_rgb):
+            j = np.argmin(np.abs(t_depth - tr))
+            k = np.argmin(np.abs(t_pose - tr))
+            if (abs(t_depth[j]-tr) < self.max_dt and
+                abs(t_pose[k]-tr) < self.max_dt):
+                matches.append((i, j, k))
+        return matches
 
     def get_current_data(self):
-        """
-        Returns a tuple exactly like dataset[idx]:
-          (color_tensor, depth_tensor, intrinsics, pose_mat)
-        where:
-         - color_tensor is CxHxW in [0,1], torch.float32 on cuda
-         - depth_tensor is 1xHxW in meters, torch.float32 on cuda
-         - intrinsics is 3x3 np.ndarray
-         - pose_mat is 4x4 np.ndarray (world→camera)
-        """
-        if self.latest_rgb is None or self.latest_depth is None or self.latest_pose is None:
+        if not (self.rgb_queue and self.depth_queue and self.pose_queue):
             return None
         
-        # Stop collecting data
+        # Extract timestamps
+        ts_rgb  = np.array([item['ts'] for item in self.rgb_queue])
+        ts_dep  = np.array([item['ts'] for item in self.depth_queue])
+        ts_pose = np.array([item['ts'] for item in self.pose_queue])
+
+        assoc = self.associate_frames(ts_rgb, ts_dep, ts_pose)
+        if not assoc:
+            return None
+        
+        # Choose most recent match
+        i,j,k = assoc[-1]
+        rgb = self.rgb_queue[i]
+        dep = self.depth_queue[j]
+        pose = self.pose_queue[k]
+
+        # Lock further callbacks until consumed
         self.map_ready = False
 
-        # unpack what you stored
-        rgb = self.latest_rgb['arr'] # HxWx3
-        dep = np.expand_dims(self.latest_depth['arr'], axis=2) # HxWx1
+        # Convert and return
+        color = torch.from_numpy(rgb['arr']).float().cuda()
+        depth = torch.from_numpy(np.expand_dims(dep['arr'], axis=2) / 
+                                 self.png_depth_scale).float().cuda()
+        pose_mat = self.pose_matrix_from_quaternion(pose['arr'])
+        pose_mat = torch.from_numpy(pose_mat).float().cuda()
+        pose_mat = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
 
-        # compute pose matrix
-        pose = self.pose_matrix_from_quaternion(self.latest_pose['arr'])
-        pose = torch.from_numpy(pose).type(torch.float).cuda()
-        pose = relative_transformation(self.initial_pose, pose, orthogonal_rotations=False)
+        intrinsics = self.intrinsics.float().cuda()
 
-        # to torch C×H×W
-        color = torch.from_numpy(rgb).type(torch.float).cuda()
-        depth = torch.from_numpy(dep / self.png_depth_scale).type(torch.float).cuda()
-
-        # get intrinsics
-        intrinsics = self.intrinsics.type(torch.float).cuda()
+        # Clear used entries
+        self.clear_used(i,j,k)
 
         # Optional: Visualize the RGBD data
         if RGBD_VIZ:
-            self.plot_images(self.latest_rgb, self.latest_depth)
+            self.plot_images(color, depth)
 
-        # clean stored data
-        self.latest_rgb   = None
-        self.latest_depth = None
-        self.latest_pose  = None
+        return color, depth, intrinsics, pose_mat
 
-        return color, depth, intrinsics, pose
+    def clear_used(self, i, j, k):
+        # Drop all entries up to index i/j/k
+        for _ in range(i+1): self.rgb_queue.popleft()
+        for _ in range(j+1): self.depth_queue.popleft()
+        for _ in range(k+1): self.pose_queue.popleft()
+
+    def pose_matrix_from_quaternion(self, arr):
+        cam2opt = Rotation.from_euler('ZYX', [-np.pi/2,0,-np.pi/2])
+        rot = Rotation.from_quat(arr[3:]) * cam2opt
+        mat = np.eye(4)
+        mat[:3,:3] = rot.as_matrix()
+        mat[:3,3]  = arr[:3]
+        return mat
 
     def plot_images(self, rgb = None, depth = None):
         # Handle RGB input
