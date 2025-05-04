@@ -4,7 +4,6 @@ import shutil
 import sys
 import time
 from importlib.machinery import SourceFileLoader
-import threading
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -566,10 +565,6 @@ def rgbd_slam(config: dict):
 
     # Initialize ROS Node
     ros_handler = RosSubscriberHandler(gradslam_data_cfg)
-    # Optional: Visualize the RGBD data
-    if RGBD_VIZ:
-        spin_thread = threading.Thread(target=ros_handler.spin, daemon=True)
-        spin_thread.start()
 
     # Init seperate dataloader for densification if required
     if seperate_densification_res:
@@ -715,6 +710,10 @@ def rgbd_slam(config: dict):
         if ros_data is None:
             rospy.logwarn("No ROS data yet, skipping")
             continue
+
+        # Optional: Visualize the RGBD data
+        if RGBD_VIZ:
+            ros_handler.plot_images()
 
         # Increment current index
         time_idx += 1
@@ -1022,6 +1021,7 @@ def rgbd_slam(config: dict):
     # Exit condition
     if rospy.is_shutdown():
         print("ROS Node Shutdown")
+        cv2.destroyAllWindows()
         exit(1)
 
     # Compute Average Runtimes
@@ -1073,6 +1073,9 @@ def rgbd_slam(config: dict):
     # Save Parameters
     save_params(params, output_dir)
 
+    # Close CV2 Windows
+    cv2.destroyAllWindows()
+
     # Close WandB Run
     if config['use_wandb']:
         wandb.finish()
@@ -1113,8 +1116,9 @@ class RosSubscriberHandler:
             self._finished_cb,queue_size=1)
 
         # GUI windows
-        cv2.namedWindow('RGB',   cv2.WINDOW_NORMAL)
-        cv2.namedWindow('Depth', cv2.WINDOW_NORMAL)
+        if RGBD_VIZ:
+            cv2.namedWindow('RGB',   cv2.WINDOW_NORMAL)
+            cv2.namedWindow('Depth', cv2.WINDOW_NORMAL)
 
     def as_intrinsics_matrix(self, intrinsics):
         """
@@ -1151,9 +1155,11 @@ class RosSubscriberHandler:
 
     def _pose_cb(self, msg: Odometry):
         ts = self._ts_ns(msg.header)
+        scale = 10.0
         pos = msg.pose.pose.position
         ori = msg.pose.pose.orientation
-        self.latest_pose = {'ts': ts, 'arr': [pos.x, pos.y, pos.z, ori.x, ori.y, ori.z, ori.w]}
+        self.latest_pose = {'ts': ts, 'arr': [pos.x / scale, pos.y / scale, pos.z / scale, 
+                                              ori.x, ori.y, ori.z, ori.w]}
         # rospy.loginfo(f"[Pose cb] ts={ts} pos=({pos.x}, {pos.y}, {pos.z})")
 
     def _trigger_cb(self, msg: Bool):
@@ -1200,62 +1206,46 @@ class RosSubscriberHandler:
 
         return color, depth, self.intrinsics, pose
 
-    def spin(self):
-        # Set ROS node rate
-        rate = rospy.Rate(30)
+    def plot_images(self):
+        # Handle RGB input
+        if self.latest_rgb:
+            d = self.latest_rgb
+            arr = d['arr']
+            enc = d['enc']
+            # rospy.loginfo(f"[RGB dbg] enc={enc} shape={arr.shape}"
+            #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
+            disp = arr
+            # normalize floats
+            if disp.dtype in (np.float32, np.float64):
+                if disp.max() <= 1.0:
+                    disp = (disp * 255).astype(np.uint8)
+                else:
+                    disp = disp.astype(np.uint8)
+            # convert color order if needed
+            if disp.ndim == 3 and disp.shape[2] == 3:
+                if 'rgb' in enc.lower():
+                    disp = cv2.cvtColor(disp, cv2.COLOR_RGB2BGR)
+            cv2.imshow('RGB', disp)
+        else:
+            rospy.logwarn("No RGB data yet.")
+
+        # Handle depth input
+        if self.latest_depth:
+            d = self.latest_depth
+            arr = d['arr']
+            enc = d['enc']
+            # rospy.loginfo(f"[Depth dbg] enc={enc} shape={arr.shape}"
+            #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
+            disp = arr.astype(np.float32)
+            if disp.max() > 0:
+                disp = (disp / disp.max() * 255).astype(np.uint8)
+            else:
+                disp = np.zeros_like(arr, np.uint8)
+            cv2.imshow('Depth', disp)
+        else:
+            rospy.logwarn("No Depth data yet.")
         
-        try:
-            while not rospy.is_shutdown():
-                if self.triggered:
-                    self.triggered = False
-
-                    # Handle RGB input
-                    if self.latest_rgb:
-                        d = self.latest_rgb
-                        arr = d['arr']
-                        enc = d['enc']
-                        # rospy.loginfo(f"[RGB dbg] enc={enc} shape={arr.shape}"
-                        #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
-                        disp = arr
-                        # normalize floats
-                        if disp.dtype in (np.float32, np.float64):
-                            if disp.max() <= 1.0:
-                                disp = (disp * 255).astype(np.uint8)
-                            else:
-                                disp = disp.astype(np.uint8)
-                        # convert color order if needed
-                        if disp.ndim == 3 and disp.shape[2] == 3:
-                            if 'rgb' in enc.lower():
-                                disp = cv2.cvtColor(disp, cv2.COLOR_RGB2BGR)
-                        cv2.imshow('RGB', disp)
-                    else:
-                        rospy.logwarn("No RGB data yet.")
-
-                    # Handle depth input
-                    if self.latest_depth:
-                        d = self.latest_depth
-                        arr = d['arr']
-                        enc = d['enc']
-                        # rospy.loginfo(f"[Depth dbg] enc={enc} shape={arr.shape}"
-                        #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
-                        disp = arr.astype(np.float32)
-                        if disp.max() > 0:
-                            disp = (disp / disp.max() * 255).astype(np.uint8)
-                        else:
-                            disp = np.zeros_like(arr, np.uint8)
-                        cv2.imshow('Depth', disp)
-                    else:
-                        rospy.logwarn("No Depth data yet.")
-                    
-                    cv2.waitKey(1)
-
-                # Wait for next message
-                rate.sleep()
-        except rospy.ROSInterruptException:
-            # Ctrl-C / rospy.signal_shutdown -> clean exit
-            pass
-        finally:
-            cv2.destroyAllWindows()
+        cv2.waitKey(1)
 
 
 if __name__ == "__main__":
