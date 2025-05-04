@@ -9,9 +9,9 @@ scene_name = scenes[int(0)]
 
 map_every = 1
 keyframe_every = 5
-mapping_window_size = 24
-tracking_iters = 40
-mapping_iters = 60
+mapping_window_size = 32
+tracking_iters = 10
+mapping_iters = 15
 
 group_name = "habitat"
 run_name = f"{scene_name}_{seed}"
@@ -49,6 +49,10 @@ config = dict(
         sequence=scene_name,
         desired_image_height=640,
         desired_image_width=480,
+        tracking_image_height=640,
+        tracking_image_width=480,
+        densification_image_height=320,
+        densification_image_width=240,
         start=0,
         end=-1,
         stride=1,
