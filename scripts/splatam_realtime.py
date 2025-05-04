@@ -1036,6 +1036,10 @@ def rgbd_slam(config: dict):
         cv2.destroyAllWindows()
         exit(1)
 
+    # Finalize Parameters
+    params['cam_unnorm_rots'] = params['cam_unnorm_rots'][..., :num_frames]
+    params['cam_trans'] = params['cam_trans'][..., :num_frames]
+
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
         tracking_iter_time_count = 1
