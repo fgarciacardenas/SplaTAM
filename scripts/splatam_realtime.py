@@ -45,7 +45,7 @@ import ros_numpy
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
-RGBD_VIZ = True
+RGBD_VIZ = False
 VERBOSE = False
 
 
