@@ -1107,6 +1107,7 @@ class RosSubscriberHandler:
         self.fy = config_dict["camera_params"]["fy"]
         self.cx = config_dict["camera_params"]["cx"]
         self.cy = config_dict["camera_params"]["cy"]
+        self.png_depth_scale = config_dict["camera_params"]["png_depth_scale"]
 
         K = torch.from_numpy(self.as_intrinsics_matrix([self.fx, self.fy, self.cx, self.cy]))
         #K = datautils.scale_intrinsics(K, self.height_downsample_ratio, self.width_downsample_ratio)
@@ -1179,7 +1180,7 @@ class RosSubscriberHandler:
             pos = msg.pose.pose.position
             ori = msg.pose.pose.orientation
             self.latest_pose = {'ts': ts, 'arr': [pos.x / scale, pos.y / scale, pos.z / scale, 
-                                                ori.x, ori.y, ori.z, ori.w]}
+                                                  ori.x, ori.y, ori.z, ori.w]}
             
             if self.initial_pose is None:
                 pose = self.pose_matrix_from_quaternion(self.latest_pose['arr'])
@@ -1231,7 +1232,7 @@ class RosSubscriberHandler:
 
         # to torch C×H×W
         color = torch.from_numpy(rgb).type(torch.float).cuda()
-        depth = torch.from_numpy(dep).type(torch.float).cuda()
+        depth = torch.from_numpy(dep / self.png_depth_scale).type(torch.float).cuda()
 
         # get intrinsics
         intrinsics = self.intrinsics.type(torch.float).cuda()
