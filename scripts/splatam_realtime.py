@@ -35,6 +35,7 @@ from utils.slam_helpers import (
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+from datasets.gradslam_datasets.geometryutils import relative_transformation
 
 # ROS dependencies
 import rospy
@@ -45,6 +46,7 @@ from std_msgs.msg import Bool
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
 RGBD_VIZ = True
+VERBOSE = False
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -189,7 +191,8 @@ def initialize_first_timestep(ros_handler, num_frames, scene_radius_depth_ratio,
 
         ros_data = ros_handler.get_current_data()
         if ros_data is None:
-            rospy.logwarn("No ROS data yet, skipping")
+            if VERBOSE:
+                rospy.logwarn("No ROS data yet, skipping")
             continue
         break
 
@@ -232,6 +235,9 @@ def initialize_first_timestep(ros_handler, num_frames, scene_radius_depth_ratio,
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio
+
+    # Collect new data
+    ros_handler.map_ready = True
 
     if densify_dataset is not None:
         return params, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
@@ -661,7 +667,8 @@ def rgbd_slam(config: dict):
 
             ros_data = ros_handler.get_current_data()
             if ros_data is None:
-                rospy.logwarn("No ROS data yet, skipping")
+                if VERBOSE:
+                    rospy.logwarn("No ROS data yet, skipping")
                 continue
 
             # Increment current index
@@ -688,6 +695,9 @@ def rgbd_slam(config: dict):
                 curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
+            
+            # Collect new data
+            ros_handler.map_ready = True
     else:
         checkpoint_time_idx = 0
 
@@ -704,16 +714,14 @@ def rgbd_slam(config: dict):
         if not ros_handler.triggered:
             rospy.sleep(0.01)
             continue
-        ros_handler.triggered = False
 
+        # Get new data sample
         ros_data = ros_handler.get_current_data()
         if ros_data is None:
-            rospy.logwarn("No ROS data yet, skipping")
+            if VERBOSE:
+                rospy.logwarn("No ROS data yet, skipping")
             continue
-
-        # Optional: Visualize the RGBD data
-        if RGBD_VIZ:
-            ros_handler.plot_images()
+        ros_handler.triggered = False
 
         # Increment current index
         time_idx += 1
@@ -901,7 +909,7 @@ def rgbd_slam(config: dict):
                 print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
             # Reset Optimizer & Learning Rates for Full Map Optimization
-            optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False) 
+            optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False)
 
             # Mapping
             mapping_start_time = time.time()
@@ -1016,7 +1024,11 @@ def rgbd_slam(config: dict):
         if config['use_wandb']:
             wandb_time_step += 1
 
+        # Clean data
         torch.cuda.empty_cache()
+
+        # Collect new data
+        ros_handler.map_ready = True
 
     # Exit condition
     if rospy.is_shutdown():
@@ -1085,8 +1097,11 @@ class RosSubscriberHandler:
         # storage for latest messages
         self.latest_rgb   = None  # dict with ts, arr, enc
         self.latest_depth = None  # dict with ts, arr, enc
+        self.latest_pose  = None  # dict with ts, arr
+        self.initial_pose = None  # arr
         self.triggered    = False
         self.finished     = False
+        self.map_ready    = True
 
         self.fx = config_dict["camera_params"]["fx"]
         self.fy = config_dict["camera_params"]["fy"]
@@ -1095,7 +1110,7 @@ class RosSubscriberHandler:
 
         K = torch.from_numpy(self.as_intrinsics_matrix([self.fx, self.fy, self.cx, self.cy]))
         #K = datautils.scale_intrinsics(K, self.height_downsample_ratio, self.width_downsample_ratio)
-        self.intrinsics = torch.eye(4).to(K).type(torch.float)
+        self.intrinsics = torch.eye(3).to(K).type(torch.float)
         self.intrinsics[:3, :3] = K
 
         # Set up ROS subscribers
@@ -1136,31 +1151,41 @@ class RosSubscriberHandler:
         return int(header.stamp.secs) * 1_000_000_000 + int(header.stamp.nsecs)
 
     def _rgb_cb(self, msg: Image):
-        ts = self._ts_ns(msg.header)
-        arr = ros_numpy.numpify(msg)
-        # store with encoding
-        self.latest_rgb = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
-        # rospy.loginfo(f"[RGB cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
-        #               f" min={arr.min()} max={arr.max()}")
+        if self.map_ready:
+            ts = self._ts_ns(msg.header)
+            arr = ros_numpy.numpify(msg)
+            # store with encoding
+            self.latest_rgb = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
+            if VERBOSE:
+                rospy.loginfo(f"[RGB cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
+                            f" min={arr.min()} max={arr.max()}")
 
     def _depth_cb(self, msg: Image):
-        ts = self._ts_ns(msg.header)
-        arr = ros_numpy.numpify(msg)
-        # scale float to uint16 if needed
-        if arr.dtype in (np.float32, np.float64):
-            arr = (arr * 1000).astype(np.uint16)
-        self.latest_depth = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
-        # rospy.loginfo(f"[Depth cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
-        #               f" min={arr.min()} max={arr.max()}")
+        if self.map_ready:
+            ts = self._ts_ns(msg.header)
+            arr = ros_numpy.numpify(msg)
+            # scale float to uint16 if needed
+            if arr.dtype in (np.float32, np.float64):
+                arr = (arr * 1000).astype(np.uint16)
+            self.latest_depth = {'ts': ts, 'arr': arr, 'enc': msg.encoding}
+            if VERBOSE:
+                rospy.loginfo(f"[Depth cb] encoding={msg.encoding} shape={arr.shape} dtype={arr.dtype}"
+                              f" min={arr.min()} max={arr.max()}")
 
     def _pose_cb(self, msg: Odometry):
-        ts = self._ts_ns(msg.header)
-        scale = 10.0
-        pos = msg.pose.pose.position
-        ori = msg.pose.pose.orientation
-        self.latest_pose = {'ts': ts, 'arr': [pos.x / scale, pos.y / scale, pos.z / scale, 
-                                              ori.x, ori.y, ori.z, ori.w]}
-        # rospy.loginfo(f"[Pose cb] ts={ts} pos=({pos.x}, {pos.y}, {pos.z})")
+        if self.map_ready:
+            ts = self._ts_ns(msg.header)
+            scale = 10.0
+            pos = msg.pose.pose.position
+            ori = msg.pose.pose.orientation
+            self.latest_pose = {'ts': ts, 'arr': [pos.x / scale, pos.y / scale, pos.z / scale, 
+                                                ori.x, ori.y, ori.z, ori.w]}
+            
+            if self.initial_pose is None:
+                pose = self.pose_matrix_from_quaternion(self.latest_pose['arr'])
+                self.initial_pose = torch.from_numpy(pose).type(torch.float).cuda()
+            if VERBOSE:
+                rospy.loginfo(f"[Pose cb] ts={ts} pos=({pos.x}, {pos.y}, {pos.z})")
 
     def _trigger_cb(self, msg: Bool):
         if msg.data:
@@ -1191,6 +1216,9 @@ class RosSubscriberHandler:
         """
         if self.latest_rgb is None or self.latest_depth is None or self.latest_pose is None:
             return None
+        
+        # Stop collecting data
+        self.map_ready = False
 
         # unpack what you stored
         rgb = self.latest_rgb['arr'] # HxWx3
@@ -1199,51 +1227,65 @@ class RosSubscriberHandler:
         # compute pose matrix
         pose = self.pose_matrix_from_quaternion(self.latest_pose['arr'])
         pose = torch.from_numpy(pose).type(torch.float).cuda()
+        pose = relative_transformation(self.initial_pose, pose, orthogonal_rotations=False)
 
         # to torch C×H×W
         color = torch.from_numpy(rgb).type(torch.float).cuda()
         depth = torch.from_numpy(dep).type(torch.float).cuda()
 
-        return color, depth, self.intrinsics, pose
+        # get intrinsics
+        intrinsics = self.intrinsics.type(torch.float).cuda()
 
-    def plot_images(self):
+        # Optional: Visualize the RGBD data
+        if RGBD_VIZ:
+            self.plot_images(self.latest_rgb, self.latest_depth)
+
+        # clean stored data
+        self.latest_rgb   = None
+        self.latest_depth = None
+        self.latest_pose  = None
+
+        return color, depth, intrinsics, pose
+
+    def plot_images(self, rgb = None, depth = None):
         # Handle RGB input
-        if self.latest_rgb:
-            d = self.latest_rgb
-            arr = d['arr']
-            enc = d['enc']
-            # rospy.loginfo(f"[RGB dbg] enc={enc} shape={arr.shape}"
-            #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
-            disp = arr
+        if rgb:
+            arr = rgb['arr']
+            enc = rgb['enc']
+            if VERBOSE:
+                rospy.loginfo(f"[RGB dbg] enc={enc} shape={arr.shape}"
+                            f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
             # normalize floats
-            if disp.dtype in (np.float32, np.float64):
-                if disp.max() <= 1.0:
-                    disp = (disp * 255).astype(np.uint8)
+            if arr.dtype in (np.float32, np.float64):
+                if arr.max() <= 1.0:
+                    arr = (arr * 255).astype(np.uint8)
                 else:
-                    disp = disp.astype(np.uint8)
+                    arr = arr.astype(np.uint8)
             # convert color order if needed
-            if disp.ndim == 3 and disp.shape[2] == 3:
+            if arr.ndim == 3 and arr.shape[2] == 3:
                 if 'rgb' in enc.lower():
-                    disp = cv2.cvtColor(disp, cv2.COLOR_RGB2BGR)
-            cv2.imshow('RGB', disp)
+                    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            cv2.imshow('RGB', arr)
         else:
-            rospy.logwarn("No RGB data yet.")
+            if VERBOSE:
+                rospy.logwarn("No RGB data yet.")
 
         # Handle depth input
-        if self.latest_depth:
-            d = self.latest_depth
-            arr = d['arr']
-            enc = d['enc']
-            # rospy.loginfo(f"[Depth dbg] enc={enc} shape={arr.shape}"
-            #             f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
-            disp = arr.astype(np.float32)
-            if disp.max() > 0:
-                disp = (disp / disp.max() * 255).astype(np.uint8)
+        if depth:
+            arr = depth['arr']
+            enc = depth['enc']
+            if VERBOSE:
+                rospy.loginfo(f"[Depth dbg] enc={enc} shape={arr.shape}"
+                            f" dtype={arr.dtype} min={arr.min()} max={arr.max()}")
+            arr = arr.astype(np.float32)
+            if arr.max() > 0:
+                arr = (arr / arr.max() * 255).astype(np.uint8)
             else:
-                disp = np.zeros_like(arr, np.uint8)
-            cv2.imshow('Depth', disp)
+                arr = np.zeros_like(arr, np.uint8)
+            cv2.imshow('Depth', arr)
         else:
-            rospy.logwarn("No Depth data yet.")
+            if VERBOSE:
+                rospy.logwarn("No Depth data yet.")
         
         cv2.waitKey(1)
 
