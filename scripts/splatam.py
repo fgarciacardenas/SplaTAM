@@ -38,6 +38,7 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 # Control flags
 DUMP_DATA = False
+LOAD_DATA = False
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -535,6 +536,20 @@ def rgbd_slam(config: dict):
         ignore_bad=dataset_config["ignore_bad"],
         use_train_split=dataset_config["use_train_split"],
     )
+
+    if DUMP_DATA:
+        dump_realtime_dataset(dataset, '/home/dev/frame_gt/')
+
+    if LOAD_DATA:
+        dataset = []
+        list_npz = sorted(f for f in os.listdir('/home/dev/frame_rt') if f.endswith('.npz'))
+        for _npz in list_npz:
+            data = np.load('/home/dev/frame_rt/' + _npz)
+            dataset.append((torch.from_numpy(data['color']).float().cuda(), 
+                            torch.from_numpy(data['depth']).float().cuda(), 
+                            torch.from_numpy(data['intrinsics']).float().cuda(), 
+                            torch.from_numpy(data['gt_pose']).float().cuda()))
+
     num_frames = dataset_config["num_frames"]
     if num_frames == -1:
         num_frames = len(dataset)
@@ -643,9 +658,6 @@ def rgbd_slam(config: dict):
                 keyframe_list.append(curr_keyframe)
     else:
         checkpoint_time_idx = 0
-    
-    if DUMP_DATA:
-        dump_realtime_dataset(dataset, '/home/dev/frame_gt/')
 
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):

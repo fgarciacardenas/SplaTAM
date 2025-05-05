@@ -1221,6 +1221,9 @@ class RosSubscriberHandler:
         dep = self.depth_queue[j]
         pose = self.pose_queue[k]
 
+        if VERBOSE:
+            print("RGB Timestamp: %d, Depth Timestamp: %d, Pose Timestamp: %d" % (rgb['ts'], dep['ts'], pose['ts']))
+
         # Lock further callbacks until consumed
         self.map_ready = False
 
