@@ -647,86 +647,30 @@ def rgbd_slam(config: dict):
     # Initialize dataset
     dataset = []
 
-    # Load Checkpoint
-    if config['load_checkpoint']:
-        checkpoint_time_idx = config['checkpoint_time_idx']
-        print(f"Loading Checkpoint for Frame {checkpoint_time_idx}")
-        ckpt_path = os.path.join(config['workdir'], config['run_name'], f"params{checkpoint_time_idx}.npz")
-        params = dict(np.load(ckpt_path, allow_pickle=True))
-        params = {k: torch.tensor(params[k]).cuda().float().requires_grad_(True) for k in params.keys()}
-        variables['max_2D_radius'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
-        variables['means2D_gradient_accum'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
-        variables['denom'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
-        variables['timestep'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
-        # Load the keyframe time idx list
-        keyframe_time_indices = np.load(os.path.join(config['workdir'], config['run_name'], f"keyframe_time_indices{checkpoint_time_idx}.npy"))
-        keyframe_time_indices = keyframe_time_indices.tolist()
-        # Update the ground truth poses list
-        time_idx = 0
-        while time_idx < checkpoint_time_idx:
-            # Block until ROS trigger fires
-            if not ros_handler.triggered:
-                rospy.sleep(0.01)
-                continue
-            ros_handler.triggered = False
-
-            ros_data = ros_handler.get_current_data()
-            if ros_data is None:
-                if VERBOSE:
-                    rospy.logwarn("No ROS data yet, skipping")
-                continue
-
-            # Increment current index
-            time_idx += 1
-
-            # Load RGBD frames incrementally instead of all frames
-            color, depth, intrinsics, gt_pose = ros_data
-            dataset.append((color, depth, intrinsics, gt_pose))
-
-            # Process poses
-            gt_w2c = torch.linalg.inv(gt_pose)
-            gt_w2c_all_frames.append(gt_w2c)
-            # Initialize Keyframe List
-            if time_idx in keyframe_time_indices:
-                # Get the estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                curr_cam_tran = params['cam_trans'][..., time_idx].detach()
-                curr_w2c = torch.eye(4).cuda().float()
-                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                curr_w2c[:3, 3] = curr_cam_tran
-                # Initialize Keyframe Info
-                color = color.permute(2, 0, 1) / 255
-                depth = depth.permute(2, 0, 1)
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
-                # Add to keyframe list
-                keyframe_list.append(curr_keyframe)
-            
-            # Collect new data
-            ros_handler.map_ready = True
-    else:
-        checkpoint_time_idx = 0
-
     # Iterate over Scan
     print("Initializing SLAM...")
-    time_idx = checkpoint_time_idx
+    time_idx = 0
     while not rospy.is_shutdown():
         # Exit if node finished flag is triggered
         if ros_handler.finished:
             num_frames = time_idx
             break
-        
-        # Block until ROS trigger fires
-        # if not ros_handler.triggered:
-        #     rospy.sleep(0.01)
-        #     continue
 
-        # Get new data sample
-        ros_data = ros_handler.get_current_data()
-        if ros_data is None:
-            if VERBOSE:
-                rospy.logwarn("No ROS data yet, skipping")
-            continue
-        ros_handler.triggered = False
+        if time_idx == 0:
+            ros_data = ros_handler.get_first_data()
+        else:
+            # Block until ROS trigger fires
+            # if not ros_handler.triggered:
+            #     rospy.sleep(0.01)
+            #     continue
+
+            # Get new data sample
+            ros_data = ros_handler.get_current_data()
+            if ros_data is None:
+                if VERBOSE:
+                    rospy.logwarn("No ROS data yet, skipping")
+                continue
+            ros_handler.triggered = False
 
         # Increment current index
         time_idx += 1
@@ -1115,8 +1059,9 @@ class RosSubscriberHandler:
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
         self.depth_queue = collections.deque(maxlen=max_queue_size)
         self.pose_queue  = collections.deque(maxlen=max_queue_size)
-
+        
         self.initial_pose = None
+        self.first_dataframe = None
         self.triggered    = False
         self.finished     = False
         self.map_ready    = True
@@ -1180,9 +1125,6 @@ class RosSubscriberHandler:
         arr = [pos.x/self.pose_scale, pos.y/self.pose_scale, pos.z/self.pose_scale,
                ori.x, ori.y, ori.z, ori.w]
         self.pose_queue.append({'ts': ts, 'arr': arr})
-        if self.initial_pose is None:
-            mat = self.pose_matrix_from_quaternion(arr)
-            self.initial_pose = torch.from_numpy(mat).float().cuda()
 
     def _trigger_cb(self, msg: Bool):
         if msg.data:
@@ -1202,6 +1144,9 @@ class RosSubscriberHandler:
                 matches.append((i, j, k))
         return matches
 
+    def get_first_data(self):
+        return self.first_dataframe
+
     def get_current_data(self):
         if not (self.rgb_queue and self.depth_queue and self.pose_queue):
             return None
@@ -1215,17 +1160,16 @@ class RosSubscriberHandler:
         if not assoc:
             return None
         
+        # Lock further callbacks until consumed
+        self.map_ready = False
+        if VERBOSE:
+            print("RGB Timestamp: %d, Depth Timestamp: %d, Pose Timestamp: %d" % (rgb['ts'], dep['ts'], pose['ts']))
+
         # Choose most recent match
         i,j,k = assoc[-1]
         rgb = self.rgb_queue[i]
         dep = self.depth_queue[j]
         pose = self.pose_queue[k]
-
-        if VERBOSE:
-            print("RGB Timestamp: %d, Depth Timestamp: %d, Pose Timestamp: %d" % (rgb['ts'], dep['ts'], pose['ts']))
-
-        # Lock further callbacks until consumed
-        self.map_ready = False
 
         # Convert and return
         color = torch.from_numpy(rgb['arr']).float().cuda()
@@ -1233,7 +1177,10 @@ class RosSubscriberHandler:
                                  self.png_depth_scale).float().cuda()
         pose_mat = self.pose_matrix_from_quaternion(pose['arr'])
         pose_mat = torch.from_numpy(pose_mat).float().cuda()
-        pose_mat = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
+
+        if self.initial_pose is None:
+            self.initial_pose = pose_mat
+        trans_pose = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
 
         intrinsics = self.intrinsics.float().cuda()
 
@@ -1244,7 +1191,10 @@ class RosSubscriberHandler:
         if RGBD_VIZ:
             self.plot_images(color, depth)
 
-        return color, depth, intrinsics, pose_mat
+        if self.first_dataframe is None:
+            self.first_dataframe = (color, depth, intrinsics, trans_pose)
+
+        return color, depth, intrinsics, trans_pose
 
     def clear_used(self, i, j, k):
         # Drop all entries up to index i/j/k
