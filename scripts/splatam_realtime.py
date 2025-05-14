@@ -36,15 +36,17 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from datasets.gradslam_datasets.geometryutils import relative_transformation
+from utils.slam_helpers import quat_mult
 
 # ROS dependencies
 import rospy
 # ros_numpy patch for Python 3.10+
 np.float = float
 import ros_numpy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32MultiArray
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseArray
 from scipy.spatial.transform import Rotation
 import collections
 
@@ -52,6 +54,7 @@ import collections
 VERBOSE = False
 RGBD_VIZ = False
 DUMP_DATA = False
+SIL_VIZ = True
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -240,6 +243,11 @@ def initialize_first_timestep(ros_handler, num_frames, scene_radius_depth_ratio,
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio
+
+    # Connect objects to ros_handler
+    ros_handler.cam = cam
+    ros_handler.w2c_ref = w2c
+    ros_handler.params = params
 
     # Collect new data
     ros_handler.map_ready = True
@@ -575,7 +583,7 @@ def rgbd_slam(config: dict):
     num_frames = 1000
 
     # Initialize ROS Node
-    ros_handler = RosSubscriberHandler(gradslam_data_cfg)
+    ros_handler = RosHandler(gradslam_data_cfg)
 
     # Init seperate dataloader for densification if required
     if seperate_densification_res:
@@ -973,6 +981,9 @@ def rgbd_slam(config: dict):
         if config['use_wandb']:
             wandb_time_step += 1
 
+        # Check if new silhouette data has been requested
+        ros_handler.send_gains()
+
         # Clean data
         torch.cuda.empty_cache()
 
@@ -1048,12 +1059,75 @@ def rgbd_slam(config: dict):
     if config['use_wandb']:
         wandb.finish()
 
-class RosSubscriberHandler:
+
+def get_silhouette(params, cam_pose, cam_data):
+    """
+    Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
+    
+    Args:
+        params: dict of parameters
+        cam_pose: camera pose
+        cam_data: camera data
+    
+    Returns:
+        transformed_gaussians: Transformed Gaussians (dict containing means3D & unnorm_rotations)
+    """
+    with torch.no_grad():
+        # Get Camera Pose
+        rel_w2c = torch.eye(4).cuda().float()
+        rel_w2c[:3, :3] = build_rotation(cam_pose[None, 3:])
+        rel_w2c[:3, 3] = cam_pose[:3]
+
+        # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
+        if params['log_scales'].shape[1] == 1:
+            transform_rots = False # Isotropic Gaussians
+        else:
+            transform_rots = True # Anisotropic Gaussians
+        
+        # Get Centers and Unnorm Rots of Gaussians in World Frame
+        pts = params['means3D'].detach()
+        unnorm_rots = params['unnorm_rotations'].detach()
+        
+        # Transform Centers of Gaussians to Camera Frame
+        transformed_gaussians = {}
+        pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+        pts4 = torch.cat((pts, pts_ones), dim=1)
+        transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
+        transformed_gaussians['means3D'] = transformed_pts
+
+        # Transform Rots of Gaussians to Camera Frame
+        if transform_rots:
+            norm_rots = F.normalize(unnorm_rots)
+            transformed_rots = quat_mult(cam_pose[3:], norm_rots)
+            transformed_gaussians['unnorm_rotations'] = transformed_rots
+        else:
+            transformed_gaussians['unnorm_rotations'] = unnorm_rots
+
+        depth_sil_rendervar = transformed_params2depthplussilhouette(params, cam_data['w2c'],
+                                                                    transformed_gaussians)
+        depth_sil, _, _, = Renderer(raster_settings=cam_data['cam'])(**depth_sil_rendervar)
+        silhouette = depth_sil[1, :, :]
+        return silhouette
+
+
+class RosHandler:
     def __init__(self, config_dict, max_queue_size=5, max_dt=0.08):
         # Parameters
         self.max_dt = max_dt
         self.max_queue_size = max_queue_size
         self.pose_scale = 10.0
+
+        # Camera objects
+        self.cam     = None
+        self.w2c_ref = None
+        self.params  = None
+
+        # Initialize visualization window
+        if SIL_VIZ:
+            self._init_viz()
+
+        # Silhouette request
+        self.gs_poses = []
 
         # Queues for synchronization
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
@@ -1088,6 +1162,11 @@ class RosSubscriberHandler:
                          self._trigger_cb, queue_size=1)
         rospy.Subscriber('/ifpp/finished_signal', Bool,
                          self._finished_cb, queue_size=1)
+        rospy.Subscriber('/ifpp/gs_poses', PoseArray,
+                         self._gs_poses_cb, queue_size=1)
+        
+        # Set up ROS publishers
+        self.gain_pub = rospy.Publisher('/ifpp/gs_gains', Float32MultiArray, queue_size=1)
         
         # GUI windows
         if RGBD_VIZ:
@@ -1133,6 +1212,41 @@ class RosSubscriberHandler:
     def _finished_cb(self, msg: Bool):
         if msg.data:
             self.finished = True
+
+    def _gs_poses_cb(self, msg: PoseArray):
+        self.gs_poses = []
+        for pose in msg.poses:
+            self.gs_poses.append(np.array([pose.position.x, pose.position.y, pose.position.z,
+                                           pose.orientation.x, pose.orientation.y,
+                                           pose.orientation.z, pose.orientation.w], dtype=np.float32))
+
+    def send_gains(self):
+        if not self.gs_poses:
+            rospy.logwarn("No GS poses available to send gains.")
+            return
+        
+        if self.cam is None or self.params is None:
+            rospy.logwarn_once("GS map not ready yet - ignoring gain request.")
+            return
+        
+        with torch.no_grad():
+            gains = []
+            cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+
+            for sil_idx, vec in enumerate(self.gs_poses):
+                pose = torch.tensor(vec, device='cuda')
+                sil  = get_silhouette(self.params, pose, cam_data) # H×W tensor
+                g = float((sil > 0.5).sum().item())
+                gains.append(g)
+
+                if SIL_VIZ and sil_idx == 0:
+                    self._show_silhouette(sil)
+
+        # Publish silhouette images
+        msg = Float32MultiArray()
+        msg.data = gains
+        self.gain_pub.publish(msg)
+        self.gs_poses.clear()
 
     def associate_frames(self, t_rgb, t_depth, t_pose):
         matches = []
@@ -1250,6 +1364,30 @@ class RosSubscriberHandler:
             if VERBOSE:
                 rospy.logwarn("No Depth data yet.")
         
+        cv2.waitKey(1)
+
+    def _init_viz(self):
+        self._viz_name   = 'Silhouette'
+        self._viz_target = 480
+        cv2.namedWindow(self._viz_name, cv2.WINDOW_NORMAL)
+        cv2.startWindowThread()
+
+    def _show_silhouette(self, sil_tensor):
+        """
+        Show a HxW torch silhouette mask in the single OpenCV window.
+        """
+        # 1. tensor → uint8 0/255 on CPU
+        mask = (sil_tensor > 0.5).cpu().numpy().astype(np.uint8) * 255
+
+        # 2. keep aspect ratio, scale so that height == self._viz_target
+        h, w = mask.shape
+        scale = self._viz_target / float(h)
+        disp  = cv2.resize(mask, (int(w*scale), self._viz_target),
+                        interpolation=cv2.INTER_NEAREST)
+
+        # 3. convert 1-channel to BGR so it shows up as white / black
+        disp = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
+        cv2.imshow(self._viz_name, disp)
         cv2.waitKey(1)
 
 
