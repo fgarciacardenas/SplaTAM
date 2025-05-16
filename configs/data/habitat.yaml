@@ -1,0 +1,9 @@
+dataset_name: 'habitat'
+camera_params:
+  image_height: 640
+  image_width: 480
+  fx: 625.2213745117188
+  fy: 625.2213745117188
+  cx: 240.5
+  cy: 320.5
+  png_depth_scale: 10000.0
