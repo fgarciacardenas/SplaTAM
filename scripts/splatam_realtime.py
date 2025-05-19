@@ -668,9 +668,13 @@ def rgbd_slam(config: dict):
             ros_data = ros_handler.get_first_data()
         else:
             # Block until ROS trigger fires
-            # if not ros_handler.triggered:
-            #     rospy.sleep(0.01)
-            #     continue
+            rospy.logwarn_once("Waiting for trigger...")
+
+            if not ros_handler.triggered:
+                # Check if new silhouette data has been requested
+                ros_handler.send_gains()
+                rospy.sleep(0.01)
+                continue
 
             # Get new data sample
             ros_data = ros_handler.get_current_data()
@@ -981,9 +985,6 @@ def rgbd_slam(config: dict):
         if config['use_wandb']:
             wandb_time_step += 1
 
-        # Check if new silhouette data has been requested
-        ros_handler.send_gains()
-
         # Clean data
         torch.cuda.empty_cache()
 
@@ -1073,11 +1074,6 @@ def get_silhouette(params, cam_pose, cam_data):
         transformed_gaussians: Transformed Gaussians (dict containing means3D & unnorm_rotations)
     """
     with torch.no_grad():
-        # Get Camera Pose
-        rel_w2c = torch.eye(4).cuda().float()
-        rel_w2c[:3, :3] = build_rotation(cam_pose[None, 3:])
-        rel_w2c[:3, 3] = cam_pose[:3]
-
         # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
         if params['log_scales'].shape[1] == 1:
             transform_rots = False # Isotropic Gaussians
@@ -1092,13 +1088,14 @@ def get_silhouette(params, cam_pose, cam_data):
         transformed_gaussians = {}
         pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
         pts4 = torch.cat((pts, pts_ones), dim=1)
-        transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
+        transformed_pts = (cam_pose @ pts4.T).T[:, :3]
         transformed_gaussians['means3D'] = transformed_pts
 
         # Transform Rots of Gaussians to Camera Frame
         if transform_rots:
+            from scipy.spatial.transform import Rotation as R
             norm_rots = F.normalize(unnorm_rots)
-            transformed_rots = quat_mult(cam_pose[3:], norm_rots)
+            transformed_rots = quat_mult(R.from_matrix(cam_pose[:3,:3]).as_quat(), norm_rots)
             transformed_gaussians['unnorm_rotations'] = transformed_rots
         else:
             transformed_gaussians['unnorm_rotations'] = unnorm_rots
@@ -1111,7 +1108,7 @@ def get_silhouette(params, cam_pose, cam_data):
 
 
 class RosHandler:
-    def __init__(self, config_dict, max_queue_size=5, max_dt=0.08):
+    def __init__(self, config_dict, max_queue_size=10, max_dt=0.08):
         # Parameters
         self.max_dt = max_dt
         self.max_queue_size = max_queue_size
@@ -1127,7 +1124,7 @@ class RosHandler:
             self._init_viz()
 
         # Silhouette request
-        self.gs_poses = []
+        self.gs_poses = collections.deque(maxlen=max_queue_size)
 
         # Queues for synchronization
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
@@ -1163,7 +1160,7 @@ class RosHandler:
         rospy.Subscriber('/ifpp/finished_signal', Bool,
                          self._finished_cb, queue_size=1)
         rospy.Subscriber('/ifpp/gs_poses', PoseArray,
-                         self._gs_poses_cb, queue_size=1)
+                         self._gs_poses_cb, queue_size=10)
         
         # Set up ROS publishers
         self.gain_pub = rospy.Publisher('/ifpp/gs_gains', Float32MultiArray, queue_size=1)
@@ -1206,47 +1203,78 @@ class RosHandler:
         self.pose_queue.append({'ts': ts, 'arr': arr})
 
     def _trigger_cb(self, msg: Bool):
-        if msg.data:
+        if msg.data and self.map_ready:
             self.triggered = True
+            #self.gs_poses.clear()
 
     def _finished_cb(self, msg: Bool):
         if msg.data:
             self.finished = True
 
     def _gs_poses_cb(self, msg: PoseArray):
-        self.gs_poses = []
-        for pose in msg.poses:
-            self.gs_poses.append(np.array([pose.position.x, pose.position.y, pose.position.z,
-                                           pose.orientation.x, pose.orientation.y,
-                                           pose.orientation.z, pose.orientation.w], dtype=np.float32))
+        rospy.loginfo(f"Received {len(msg.poses)} GS poses")
+        pose_arr = []
+        for pose_msg in msg.poses:
+            pose = np.array([pose_msg.position.x, pose_msg.position.y, pose_msg.position.z,
+                             pose_msg.orientation.x, pose_msg.orientation.y,
+                             pose_msg.orientation.z, pose_msg.orientation.w], dtype=np.float32)
+            pose_arr.append(pose)
+        pose_arr = np.array(pose_arr)
+        self.gs_poses.append(pose_arr)
 
     def send_gains(self):
-        if not self.gs_poses:
-            rospy.logwarn("No GS poses available to send gains.")
+        if self.triggered:
+            rospy.logwarn("Cannot process GS poses while mapping is running.")
+            return
+
+        if len(self.gs_poses) == 0:
+            #rospy.logwarn("No GS poses available to send gains.")
             return
         
         if self.cam is None or self.params is None:
             rospy.logwarn_once("GS map not ready yet - ignoring gain request.")
             return
         
-        with torch.no_grad():
-            gains = []
-            cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+        if self.initial_pose is None:
+            rospy.logwarn_once("Initial pose not set - ignoring gain request.")
+            return
 
-            for sil_idx, vec in enumerate(self.gs_poses):
-                pose = torch.tensor(vec, device='cuda')
-                sil  = get_silhouette(self.params, pose, cam_data) # H×W tensor
-                g = float((sil > 0.5).sum().item())
-                gains.append(g)
+        # Get the camera pose array
+        n_samples = len(self.gs_poses)
+        pose_arrays = []
+        for _ in range(n_samples):
+            if self.gs_poses:  # Check if deque is not empty
+                pose_arrays.append(self.gs_poses.popleft())
+            else:
+                break
 
-                if SIL_VIZ and sil_idx == 0:
-                    self._show_silhouette(sil)
+            # Now process each collected pose array
+        for pose_arr in pose_arrays:
+            #pose_arr = self.gs_poses.popleft()
 
-        # Publish silhouette images
-        msg = Float32MultiArray()
-        msg.data = gains
-        self.gain_pub.publish(msg)
-        self.gs_poses.clear()
+            with torch.no_grad():
+                gains = []
+                cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+
+
+                for sil_idx, vec in enumerate(pose_arr):
+                    pose_mat = self.pose_matrix_from_quaternion(vec)
+                    pose_mat = torch.from_numpy(pose_mat).float().cuda()
+                    pose = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
+                    sil  = get_silhouette(self.params, pose, cam_data) # H×W tensor
+                    g = float((sil < 0.5).sum().item())
+                    gains.append(g)
+
+                    if SIL_VIZ and sil_idx == 0:
+                        self._show_silhouette(sil)
+            
+            # Publish silhouette images
+            msg = Float32MultiArray()
+            msg.data = gains
+            rospy.loginfo(f"Publishing {len(gains)} gains: {gains}")
+            self.gain_pub.publish(msg)
+            rospy.loginfo(f"Position [{pose_arr[0][0]:.2f}, {pose_arr[0][1]:.2f}, {pose_arr[0][2]:.2f}]")
+            #self.gs_poses.clear()
 
     def associate_frames(self, t_rgb, t_depth, t_pose):
         matches = []
