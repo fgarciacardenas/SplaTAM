@@ -1251,46 +1251,38 @@ class RosHandler:
             rospy.logwarn_once("Initial pose not set - ignoring gain request.")
             return
 
-        # Get the camera pose array
-        n_samples = len(self.gs_poses)
-        pose_arrays = []
-        for _ in range(n_samples):
-            if len(self.gs_poses):  # Check that deque is not empty
-                pose_arrays.append(self.gs_poses.popleft())
-            else:
-                break
-
         # Check whether more than one array was found
-        if len(pose_arrays) > 1:
-            rospy.logwarn(f"Attempting to process {len(pose_arrays)} pose arrays!")
+        n_samples = len(self.gs_poses)
+        if n_samples > 1:
+            rospy.logwarn(f"Attempting to process {n_samples} pose arrays! Cleaning queue...")
+            for _ in (n_samples - 1):
+                self.gs_poses.popleft()
+
+        # Now process each collected pose
+        pose_arr = self.gs_poses.popleft()
+        with torch.no_grad():
+            gains = []
+            cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+
+            for sil_idx, vec in enumerate(pose_arr):
+                pose_mat = self.pose_matrix_from_quaternion(vec)
+                pose_mat = torch.from_numpy(pose_mat).float().cuda()
+                pose = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
+                sil  = get_silhouette(self.params, pose, cam_data) # H×W tensor
+                g = float((sil < 0.5).sum().item())
+                gains.append(g)
+
+                if SIL_VIZ and sil_idx == 0:
+                    self._show_silhouette(sil)
         
-        # Now process each collected pose array
-        for pose_arr in pose_arrays:
-            #pose_arr = self.gs_poses.popleft()
-
-            with torch.no_grad():
-                gains = []
-                cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
-
-
-                for sil_idx, vec in enumerate(pose_arr):
-                    pose_mat = self.pose_matrix_from_quaternion(vec)
-                    pose_mat = torch.from_numpy(pose_mat).float().cuda()
-                    pose = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
-                    sil  = get_silhouette(self.params, pose, cam_data) # H×W tensor
-                    g = float((sil < 0.5).sum().item())
-                    gains.append(g)
-
-                    if SIL_VIZ and sil_idx == 0:
-                        self._show_silhouette(sil)
-            
-            # Publish silhouette images
-            msg = Float32MultiArray()
-            msg.data = gains
-            rospy.loginfo(f"Publishing {len(gains)} gains: {gains}")
-            self.gain_pub.publish(msg)
-            rospy.loginfo(f"Position [{pose_arr[0][0]:.2f}, {pose_arr[0][1]:.2f}, {pose_arr[0][2]:.2f}]")
-            #self.gs_poses.clear()
+        # Publish silhouette images
+        msg = Float32MultiArray()
+        msg.data = gains
+        if True: # VERBOSE
+            rospy.loginfo(f"Publishing gains {gains} for position [{pose_arr[0][0]:.2f}, {pose_arr[0][1]:.2f}, {pose_arr[0][2]:.2f}]...")
+        self.gain_pub.publish(msg)
+        
+        #self.gs_poses.clear()
 
     def associate_frames(self, t_rgb, t_depth, t_pose):
         matches = []
