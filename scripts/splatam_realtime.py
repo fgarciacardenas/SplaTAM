@@ -1255,7 +1255,7 @@ class RosHandler:
         n_samples = len(self.gs_poses)
         if n_samples > 1:
             rospy.logwarn(f"Attempting to process {n_samples} pose arrays! Cleaning queue...")
-            for _ in (n_samples - 1):
+            for _ in range(n_samples - 1):
                 self.gs_poses.popleft()
 
         # Now process each collected pose
