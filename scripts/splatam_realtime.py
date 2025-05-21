@@ -55,8 +55,13 @@ import collections
 VERBOSE = False
 STREAM_VIZ = False
 DUMP_DATA = False
-SIL_VIZ = True
-RGB_VIZ = True
+SIL_VIZ  = False  # Show Silhouette image
+RGB_VIZ  = False  # Show RGB render image
+GRID_VIZ = True   # Show XY occupancy grid
+
+OCC_SCALE = 30            # px per grid cell (30: every 0.5 m cell becomes 30×30 px)
+PT_COLOR  = (0, 255, 255) # 2D point color (BGR – cyan)
+PT_RADIUS = 1             # 2D point size (px)
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -1128,6 +1133,74 @@ def get_silhouette(params, cam_pose, cam_data, _render = False):
         return silhouette, rgb_render
 
 
+def grid_to_cv2(occ: torch.Tensor, free_val: int = 255,
+                occ_val: int = 0, scale: int = 1) -> np.ndarray:
+    """
+    Convert occupancy grid to an OpenCV BGR image (white = free, black = occupied).
+    Output resolution equals the grid resolution; you can cv2.resize() later.
+    """
+    img = (~occ).cpu().numpy().astype(np.uint8) * free_val  # free cells = 255
+    img[img == 0] = occ_val                                 # occupied = 0
+    img3 = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if scale != 1:
+        h, w = img3.shape[:2]
+        img3 = cv2.resize(img3, (w*scale, h*scale),
+                          interpolation=cv2.INTER_NEAREST)
+    return img3
+
+
+def make_occupancy_grid(
+        xyz        : torch.Tensor,
+        init_pose  : torch.Tensor,
+        z_slice    : float = 0.50,
+        z_tol      : float = 0.10,
+        cell       : float = 0.50,
+        min_points : int   = 10,
+):
+    """
+    Return (occ_mask, extent) for all points whose z-coord lies in
+    [z_slice ± z_tol]. A cell is occupied if ≥ min_points fall into it.
+    """
+    if xyz.ndim != 2 or xyz.shape[1] != 3:
+        raise ValueError("xyz must be (N,3)")
+    
+    # Convert points to camera frame
+    pts_ones = torch.ones(xyz.shape[0], 1).cuda().float()
+    pts4 = torch.cat((xyz, pts_ones), dim=1)
+    xyz = (init_pose @ pts4.T).T[:, :3]
+
+    # Filter points by z level
+    z_low, z_high = z_slice - z_tol, z_slice + z_tol
+    use = (xyz[:, 2] >=  z_low) & (xyz[:, 2] <= z_high)
+    if not use.any():
+        return (torch.zeros((1, 1), dtype=torch.bool, device=xyz.device),
+                {"xmin":0, "xmax":0, "ymin":0, "ymax":0, "cell":cell})
+    flat = xyz[use, :2] # Shape: (M,2)
+
+    # Grid index for every point
+    xmin, ymin = flat.min(0).values
+    xmax, ymax = flat.max(0).values
+    ix = torch.div(flat[:, 0] - xmin, cell, rounding_mode='floor').long()
+    iy = torch.div(flat[:, 1] - ymin, cell, rounding_mode='floor').long()
+    W = (torch.div(xmax - xmin, cell, rounding_mode='floor').long() + 1).item()
+    H = (torch.div(ymax - ymin, cell, rounding_mode='floor').long() + 1).item()
+
+    # 1-D indices
+    lin = (iy * W + ix).cpu()
+
+    # Compute level histogram
+    counts = torch.bincount(lin, minlength=H*W).reshape(H, W).to(xyz.device)
+
+    # Mask and book-keeping
+    occ = (counts >= min_points).bool().flip(0)  # Y axis up
+    extent = {
+        "xmin": xmin.item(),  "xmax": xmax.item(),
+        "ymin": ymin.item(),  "ymax": ymax.item(),
+        "cell": cell,
+    }
+    return occ, extent
+
+
 def _make_canvas(cols, rows, cell_w, cell_h, text_h):
     H = rows * (cell_h + text_h)
     W = cols * cell_w
@@ -1151,6 +1224,9 @@ class RosHandler:
             cv2.namedWindow("Silhouettes", cv2.WINDOW_NORMAL)
         if RGB_VIZ:
             cv2.namedWindow("Renders", cv2.WINDOW_NORMAL)
+        if GRID_VIZ:
+            cv2.namedWindow("Occupancy", cv2.WINDOW_NORMAL)
+            self.last_grid_img = None
 
         # Grid geometry (shared)
         self._cols   = 4
@@ -1298,6 +1374,10 @@ class RosHandler:
             rospy.logwarn(f"Attempting to process {n_samples} pose arrays! Cleaning queue...")
             for _ in range(n_samples - 1):
                 self.gs_poses.popleft()
+
+        # Refresh occupancy grid once per call
+        if GRID_VIZ:
+            self._update_occupancy_window(z_slice=0.1, z_tol=0.15, cell=0.002, min_points=100)
 
         # Now process each collected pose
         pose_arr = self.gs_poses.popleft()
@@ -1515,6 +1595,63 @@ class RosHandler:
         tile = self._build_tile(rgb, cap)
         self._rgb_next_idx = self._blit_tile(self._rgb_canvas, self._rgb_next_idx, tile)
         cv2.imshow("Renders", self._rgb_canvas)
+        cv2.waitKey(1)
+
+    def _update_occupancy_window(self, z_slice=0.0, z_tol=0.15,
+                                 cell=0.20, min_points=5):
+        """Re-draw occupancy + slice-points"""
+        if not GRID_VIZ or self.params is None:
+            return
+
+        # Occupancy grid (bool tensor) + spatial extent
+        occ, extent = make_occupancy_grid(
+            self.params['means3D'],
+            init_pose=self.initial_pose,
+            z_slice=z_slice, z_tol=z_tol,
+            cell=cell, min_points=min_points
+        )
+
+        # Convert grid to CV2 format
+        img = grid_to_cv2(occ, scale=OCC_SCALE)  # white = free, black = occ
+        h, w = occ.shape                         # grid size (rows, cols)
+
+        # Extract ALL points that belong to the same Z-slice
+        xyz  = self.params['means3D']  # Shape: (N,3)
+        pts_ones = torch.ones(xyz.shape[0], 1).cuda().float()
+        pts4 = torch.cat((xyz, pts_ones), dim=1)
+        xyz  = (self.initial_pose @ pts4.T).T[:, :3]
+        z    = xyz[:, 2]
+        mask = (z >= (z_slice - z_tol)) & (z <= (z_slice + z_tol))
+        
+        if mask.any():
+            xy = xyz[mask, :2].detach().cpu()  # Shape: (M,2)
+
+            # Metric to grid
+            x_rel = (xy[:, 0] - extent['xmin']) / extent['cell']
+            y_rel = (xy[:, 1] - extent['ymin']) / extent['cell']
+
+            # Grid to pixel
+            px = (x_rel * OCC_SCALE).numpy()
+            py = ((h - 1 - y_rel) * OCC_SCALE).numpy()
+
+            # Draw every point
+            for xi, yi in zip(px.astype(np.int32), py.astype(np.int32)):
+                cv2.circle(
+                    img, 
+                    center=(xi, yi), 
+                    radius=PT_RADIUS,
+                    color=PT_COLOR,
+                    thickness=-1,
+                    lineType=cv2.LINE_AA
+                )
+
+        # Refresh the window
+        if self.last_grid_img is None or not np.array_equal(img, self.last_grid_img):
+            self.last_grid_img = img.copy()
+            cv2.imshow("Occupancy", img)
+            cv2.resizeWindow("Occupancy", img.shape[1], img.shape[0])
+        else:
+            cv2.imshow("Occupancy", img)
         cv2.waitKey(1)
 
 
