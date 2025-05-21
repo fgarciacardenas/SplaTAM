@@ -192,16 +192,22 @@ def initialize_first_timestep(ros_handler, num_frames, scene_radius_depth_ratio,
                               mean_sq_dist_method, densify_dataset=None, gaussian_distribution=None):
     # Block until ROS trigger fires
     while not rospy.is_shutdown():
+        # Send ready signal
+        ros_handler.send_ready()
+        
+        # Wait for handler to be triggered
         if not ros_handler.triggered:
             rospy.sleep(0.01)
             continue
-        ros_handler.triggered = False
 
+        # Read data in buffers
         ros_data = ros_handler.get_current_data()
         if ros_data is None:
             if VERBOSE:
                 rospy.logwarn("No ROS data yet, skipping")
             continue
+
+        ros_handler.triggered = False
         break
 
     if rospy.is_shutdown():
@@ -1108,7 +1114,7 @@ def get_silhouette(params, cam_pose, cam_data):
 
 
 class RosHandler:
-    def __init__(self, config_dict, max_queue_size=10, max_dt=0.08):
+    def __init__(self, config_dict, max_queue_size=5, max_dt=0.08):
         # Parameters
         self.max_dt = max_dt
         self.max_queue_size = max_queue_size
@@ -1160,10 +1166,11 @@ class RosHandler:
         rospy.Subscriber('/ifpp/finished_signal', Bool,
                          self._finished_cb, queue_size=1)
         rospy.Subscriber('/ifpp/gs_poses', PoseArray,
-                         self._gs_poses_cb, queue_size=10)
+                         self._gs_poses_cb, queue_size=1)
         
         # Set up ROS publishers
         self.gain_pub = rospy.Publisher('/ifpp/gs_gains', Float32MultiArray, queue_size=1)
+        self.ready_pub = rospy.Publisher('/ifpp/ready_signal', Bool, queue_size=1)
         
         # GUI windows
         if RGBD_VIZ:
@@ -1222,6 +1229,11 @@ class RosHandler:
         pose_arr = np.array(pose_arr)
         self.gs_poses.append(pose_arr)
 
+    def send_ready(self):
+        msg = Bool()
+        msg.data = True
+        self.ready_pub.publish(msg)
+
     def send_gains(self):
         if self.triggered:
             rospy.logwarn("Cannot process GS poses while mapping is running.")
@@ -1243,12 +1255,16 @@ class RosHandler:
         n_samples = len(self.gs_poses)
         pose_arrays = []
         for _ in range(n_samples):
-            if self.gs_poses:  # Check if deque is not empty
+            if len(self.gs_poses):  # Check that deque is not empty
                 pose_arrays.append(self.gs_poses.popleft())
             else:
                 break
 
-            # Now process each collected pose array
+        # Check whether more than one array was found
+        if len(pose_arrays) > 1:
+            rospy.logwarn(f"Attempting to process {len(pose_arrays)} pose arrays!")
+        
+        # Now process each collected pose array
         for pose_arr in pose_arrays:
             #pose_arr = self.gs_poses.popleft()
 
