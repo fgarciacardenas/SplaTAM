@@ -1603,47 +1603,48 @@ class RosHandler:
         if not GRID_VIZ or self.params is None:
             return
 
-        # Occupancy grid (bool tensor) + spatial extent
-        occ, extent = make_occupancy_grid(
-            self.params['means3D'],
-            init_pose=self.initial_pose,
-            z_slice=z_slice, z_tol=z_tol,
-            cell=cell, min_points=min_points
-        )
+        with torch.no_grad():
+            # Occupancy grid (bool tensor) + spatial extent
+            occ, extent = make_occupancy_grid(
+                self.params['means3D'],
+                init_pose=self.initial_pose,
+                z_slice=z_slice, z_tol=z_tol,
+                cell=cell, min_points=min_points
+            )
 
-        # Convert grid to CV2 format
-        img = grid_to_cv2(occ, scale=OCC_SCALE)  # white = free, black = occ
-        h, w = occ.shape                         # grid size (rows, cols)
+            # Convert grid to CV2 format
+            img = grid_to_cv2(occ, scale=OCC_SCALE)  # white = free, black = occ
+            h, w = occ.shape                         # grid size (rows, cols)
 
-        # Extract ALL points that belong to the same Z-slice
-        xyz  = self.params['means3D']  # Shape: (N,3)
-        pts_ones = torch.ones(xyz.shape[0], 1).cuda().float()
-        pts4 = torch.cat((xyz, pts_ones), dim=1)
-        xyz  = (self.initial_pose @ pts4.T).T[:, :3]
-        z    = xyz[:, 2]
-        mask = (z >= (z_slice - z_tol)) & (z <= (z_slice + z_tol))
-        
-        if mask.any():
-            xy = xyz[mask, :2].detach().cpu()  # Shape: (M,2)
+            # Extract ALL points that belong to the same Z-slice
+            xyz  = self.params['means3D']  # Shape: (N,3)
+            pts_ones = torch.ones(xyz.shape[0], 1).cuda().float()
+            pts4 = torch.cat((xyz, pts_ones), dim=1)
+            xyz  = (self.initial_pose @ pts4.T).T[:, :3]
+            z    = xyz[:, 2]
+            mask = (z >= (z_slice - z_tol)) & (z <= (z_slice + z_tol))
+            
+            if mask.any():
+                xy = xyz[mask, :2].detach().cpu()  # Shape: (M,2)
 
-            # Metric to grid
-            x_rel = (xy[:, 0] - extent['xmin']) / extent['cell']
-            y_rel = (xy[:, 1] - extent['ymin']) / extent['cell']
+                # Metric to grid
+                x_rel = (xy[:, 0] - extent['xmin']) / extent['cell']
+                y_rel = (xy[:, 1] - extent['ymin']) / extent['cell']
 
-            # Grid to pixel
-            px = (x_rel * OCC_SCALE).numpy()
-            py = ((h - 1 - y_rel) * OCC_SCALE).numpy()
+                # Grid to pixel
+                px = (x_rel * OCC_SCALE).numpy()
+                py = ((h - 1 - y_rel) * OCC_SCALE).numpy()
 
-            # Draw every point
-            for xi, yi in zip(px.astype(np.int32), py.astype(np.int32)):
-                cv2.circle(
-                    img, 
-                    center=(xi, yi), 
-                    radius=PT_RADIUS,
-                    color=PT_COLOR,
-                    thickness=-1,
-                    lineType=cv2.LINE_AA
-                )
+                # Draw every point
+                for xi, yi in zip(px.astype(np.int32), py.astype(np.int32)):
+                    cv2.circle(
+                        img, 
+                        center=(xi, yi), 
+                        radius=PT_RADIUS,
+                        color=PT_COLOR,
+                        thickness=-1,
+                        lineType=cv2.LINE_AA
+                    )
 
         # Refresh the window
         if self.last_grid_img is None or not np.array_equal(img, self.last_grid_img):
