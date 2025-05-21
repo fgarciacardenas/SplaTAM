@@ -53,9 +53,10 @@ import collections
 
 # Control flags
 VERBOSE = False
-RGBD_VIZ = False
+STREAM_VIZ = False
 DUMP_DATA = False
 SIL_VIZ = True
+RGB_VIZ = True
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -1068,7 +1069,7 @@ def rgbd_slam(config: dict):
         wandb.finish()
 
 
-def get_silhouette(params, cam_pose, cam_data):
+def get_silhouette(params, cam_pose, cam_data, _render = False):
     """
     Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
     
@@ -1076,9 +1077,11 @@ def get_silhouette(params, cam_pose, cam_data):
         params: dict of parameters
         cam_pose: camera pose
         cam_data: camera data
+        _render: flag whether to return RGB render
     
     Returns:
-        transformed_gaussians: Transformed Gaussians (dict containing means3D & unnorm_rotations)
+        silhouette: silhouette image
+        rgb_render: RGB rendered image (optional, default: None)
     """
     with torch.no_grad():
         # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
@@ -1107,11 +1110,28 @@ def get_silhouette(params, cam_pose, cam_data):
         else:
             transformed_gaussians['unnorm_rotations'] = unnorm_rots
 
+        # Initialize Render Variables
+        if _render:
+            rendervar = transformed_params2rendervar(params, transformed_gaussians)
+            rgb_render, _, _, = Renderer(raster_settings=cam_data['cam'])(**rendervar)
+        else:
+            rgb_render = None
+        
+        # Get depth render
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, cam_data['w2c'],
-                                                                    transformed_gaussians)
+                                                                     transformed_gaussians)
+        
+        # Extract silhouette image
         depth_sil, _, _, = Renderer(raster_settings=cam_data['cam'])(**depth_sil_rendervar)
         silhouette = depth_sil[1, :, :]
-        return silhouette
+
+        return silhouette, rgb_render
+
+
+def _make_canvas(cols, rows, cell_w, cell_h, text_h):
+    H = rows * (cell_h + text_h)
+    W = cols * cell_w
+    return np.zeros((H, W, 3), np.uint8)
 
 
 class RosHandler:
@@ -1128,7 +1148,25 @@ class RosHandler:
 
         # Initialize visualization window
         if SIL_VIZ:
-            self._init_viz()
+            cv2.namedWindow("Silhouettes", cv2.WINDOW_NORMAL)
+        if RGB_VIZ:
+            cv2.namedWindow("Renders", cv2.WINDOW_NORMAL)
+
+        # Grid geometry (shared)
+        self._cols   = 4
+        self._rows   = 2
+        self._cell_w = 480
+        self._cell_h = 640
+        self._text_h = 32
+
+        # separate state for each window
+        self._sil_canvas = _make_canvas(self._cols, self._rows,
+                                        self._cell_w, self._cell_h, self._text_h)
+        self._sil_next_idx = 0
+
+        self._rgb_canvas = _make_canvas(self._cols, self._rows,
+                                        self._cell_w, self._cell_h, self._text_h)
+        self._rgb_next_idx = 0
 
         # Silhouette request
         self.gs_poses = collections.deque(maxlen=max_queue_size)
@@ -1174,7 +1212,7 @@ class RosHandler:
         self.ready_pub = rospy.Publisher('/ifpp/ready_signal', Bool, queue_size=1)
         
         # GUI windows
-        if RGBD_VIZ:
+        if STREAM_VIZ:
             cv2.namedWindow('RGB',   cv2.WINDOW_NORMAL)
             cv2.namedWindow('Depth', cv2.WINDOW_NORMAL)
 
@@ -1271,17 +1309,16 @@ class RosHandler:
                 pose_mat = self.pose_matrix_from_quaternion(vec)
                 pose_mat = torch.from_numpy(pose_mat).float().cuda()
                 pose = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
-                sil  = get_silhouette(self.params, pose, cam_data) # H×W tensor
+                sil, rgb_render = get_silhouette(self.params, pose, cam_data, _render = True) # H×W tensor
                 g = float((sil < 0.5).sum().item())
                 gains.append(g)
 
                 if SIL_VIZ:
-                    self._show_silhouette(sil,
-                                          pose_vec=vec,
-                                          gain=g,
-                                          reset=(sil_idx == 0))
+                    self._show_silhouette(sil, pose_vec=vec, gain=g, reset=(sil_idx == 0))
+                if RGB_VIZ and (rgb_render is not None):
+                    self._show_render(rgb_render, pose_vec=vec, gain=g, reset=(sil_idx == 0))
         
-        # Publish silhouette images
+        # Publish silhouette gains
         msg = Float32MultiArray()
         msg.data = gains
         if True: # VERBOSE
@@ -1351,7 +1388,7 @@ class RosHandler:
         self.clear_used(i,j,k)
 
         # Optional: Visualize the RGBD data
-        if RGBD_VIZ:
+        if STREAM_VIZ:
             self.plot_images(color, depth)
 
         if self.first_dataframe is None:
@@ -1415,78 +1452,69 @@ class RosHandler:
         
         cv2.waitKey(1)
 
-    def _init_viz(self):
-        """Create OpenCV window that shows the 8 silhouettes in a fixed 4x2 grid."""
-        self._viz_name   = "Silhouettes"
-        cv2.namedWindow(self._viz_name, cv2.WINDOW_NORMAL)
-        cv2.startWindowThread()
+    def _build_tile(self, img3u8, caption):
+        """Return <tile_h+text_h, cell_w, 3> ready to blit."""
+        # Resize image for canvas
+        img = cv2.resize(img3u8, (self._cell_w, self._cell_h),
+                         interpolation=cv2.INTER_NEAREST)
 
-        # Fixed grid geometry
-        self._viz_cols     = 4     # 4 columns
-        self._viz_rows     = 2     # 2 rows
-        self._mask_src_w   = 480   # Original mask width
-        self._mask_src_h   = 640   # Original mask height
-        self._scale        = 1  # Image scale factor
-
-        self._tile_w       = int(self._mask_src_w * self._scale)   # 120
-        self._tile_h       = int(self._mask_src_h * self._scale)   # 160
-        self._text_h       = 32                                    # caption strip
-        self._tile_tot_h   = self._tile_h + self._text_h
-
-        # Full canvas
-        H = self._viz_rows * self._tile_tot_h
-        W = self._viz_cols * self._tile_w
-        self._viz_canvas   = np.zeros((H, W, 3), dtype=np.uint8)
-
-        # Next slot to fill
-        self._viz_next_idx = 0
-    
-    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False):
-        """
-        Place one 640x480 silhouette into the next cell of the fixed grid,
-        with a subtitle:  “Pose: x, y, z, yaw  |  Gain: ##”.
-        """
-
-        # Reset on first tile of a new 8-pose batch
-        if reset:
-            self._viz_canvas.fill(0)
-            self._viz_next_idx = 0
-
-        # Safety guard
-        if self._viz_next_idx >= self._viz_cols * self._viz_rows:
-            return
-
-        # Prepare miniature mask
-        mask = (sil_tensor > 0.5).cpu().numpy().astype(np.uint8) * 255
-        mini = cv2.resize(mask, (self._tile_w, self._tile_h),
-                          interpolation=cv2.INTER_NEAREST)
-        mini = cv2.cvtColor(mini, cv2.COLOR_GRAY2BGR)
-
-        # Generate caption
-        x, y, z = pose_vec[:3]
-        qx, qy, qz, qw = pose_vec[3:]
-        siny  = 2 * (qw*qz + qx*qy)
-        cosy  = 1 - 2 * (qy*qy + qz*qz)
-        yaw   = math.degrees(math.atan2(siny, cosy))
-
-        caption = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.0f}"
-        strip   = np.zeros((self._text_h, self._tile_w, 3), np.uint8)
+        # Add caption to image strip
+        strip = np.zeros((self._text_h, self._cell_w, 3), np.uint8)
         cv2.putText(strip, caption, (2, self._text_h - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,255), 1,
                     lineType=cv2.LINE_AA)
+        return np.vstack([img, strip])
 
-        tile = np.vstack([mini, strip]) # (tile_tot_h × tile_w × 3)
+    def _blit_tile(self, canvas, next_idx, tile):
+        # Construct canvas
+        r = next_idx // self._cols
+        c = next_idx %  self._cols
+        y0 = r * (self._cell_h + self._text_h)
+        x0 = c * self._cell_w
+        canvas[y0:y0+self._cell_h+self._text_h,
+            x0:x0+self._cell_w] = tile
+        return next_idx + 1
 
-        # Paste into canvas
-        r = self._viz_next_idx // self._viz_cols
-        c = self._viz_next_idx %  self._viz_cols
-        y0, y1 = r * self._tile_tot_h, (r + 1) * self._tile_tot_h
-        x0, x1 = c * self._tile_w,     (c + 1) * self._tile_w
-        self._viz_canvas[y0:y1, x0:x1] = tile
-        self._viz_next_idx += 1
+    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False):
+        if reset:
+            self._sil_canvas.fill(0)
+            self._sil_next_idx = 0
 
-        # Show canvas
-        cv2.imshow(self._viz_name, self._viz_canvas)
+        if self._sil_next_idx >= self._cols * self._rows:
+            return
+
+        mask = (sil_tensor < .5).cpu().numpy().astype(np.uint8) * 255
+        mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        x, y, z = pose_vec[:3]
+        yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
+                                    1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
+        cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.0f}"
+
+        tile = self._build_tile(mask, cap)
+        self._sil_next_idx = self._blit_tile(self._sil_canvas, self._sil_next_idx, tile)
+        cv2.imshow("Silhouettes", self._sil_canvas)
+        cv2.waitKey(1)
+
+    def _show_render(self, rgb_tensor, pose_vec, gain, reset=False):
+        if reset:
+            self._rgb_canvas.fill(0)
+            self._rgb_next_idx = 0
+
+        if self._rgb_next_idx >= self._cols * self._rows:
+            return
+
+        rgb = (rgb_tensor.clamp(0,1).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+        x, y, z = pose_vec[:3]
+        yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
+                                    1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
+        cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.0f}"
+
+        tile = self._build_tile(rgb, cap)
+        self._rgb_next_idx = self._blit_tile(self._rgb_canvas, self._rgb_next_idx, tile)
+        cv2.imshow("Renders", self._rgb_canvas)
         cv2.waitKey(1)
 
 
