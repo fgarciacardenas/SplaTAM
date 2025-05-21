@@ -16,6 +16,7 @@ for p in sys.path:
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import math
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -1222,7 +1223,9 @@ class RosHandler:
         rospy.loginfo(f"Received {len(msg.poses)} GS poses")
         pose_arr = []
         for pose_msg in msg.poses:
-            pose = np.array([pose_msg.position.x, pose_msg.position.y, pose_msg.position.z,
+            pose = np.array([pose_msg.position.x/self.pose_scale, 
+                             pose_msg.position.y/self.pose_scale, 
+                             pose_msg.position.z/self.pose_scale,
                              pose_msg.orientation.x, pose_msg.orientation.y,
                              pose_msg.orientation.z, pose_msg.orientation.w], dtype=np.float32)
             pose_arr.append(pose)
@@ -1272,8 +1275,11 @@ class RosHandler:
                 g = float((sil < 0.5).sum().item())
                 gains.append(g)
 
-                if SIL_VIZ and sil_idx == 0:
-                    self._show_silhouette(sil)
+                if SIL_VIZ:
+                    self._show_silhouette(sil,
+                                          pose_vec=vec,
+                                          gain=g,
+                                          reset=(sil_idx == 0))
         
         # Publish silhouette images
         msg = Float32MultiArray()
@@ -1327,6 +1333,13 @@ class RosHandler:
                                  self.png_depth_scale).float().cuda()
         pose_mat = self.pose_matrix_from_quaternion(pose['arr'])
         pose_mat = torch.from_numpy(pose_mat).float().cuda()
+
+        # Remove values large than max depth
+        # print("Depth min pre: ", depth.min().item())
+        # print("Depth max pre: ", depth.max().item())
+        depth[depth >= 0.95] = -1
+        # print("Depth min post: ", depth.min().item())
+        # print("Depth max post: ", depth.max().item())
 
         if self.initial_pose is None:
             self.initial_pose = pose_mat
@@ -1403,27 +1416,77 @@ class RosHandler:
         cv2.waitKey(1)
 
     def _init_viz(self):
-        self._viz_name   = 'Silhouette'
-        self._viz_target = 480
+        """Create OpenCV window that shows the 8 silhouettes in a fixed 4x2 grid."""
+        self._viz_name   = "Silhouettes"
         cv2.namedWindow(self._viz_name, cv2.WINDOW_NORMAL)
         cv2.startWindowThread()
 
-    def _show_silhouette(self, sil_tensor):
+        # Fixed grid geometry
+        self._viz_cols     = 4     # 4 columns
+        self._viz_rows     = 2     # 2 rows
+        self._mask_src_w   = 480   # Original mask width
+        self._mask_src_h   = 640   # Original mask height
+        self._scale        = 1  # Image scale factor
+
+        self._tile_w       = int(self._mask_src_w * self._scale)   # 120
+        self._tile_h       = int(self._mask_src_h * self._scale)   # 160
+        self._text_h       = 32                                    # caption strip
+        self._tile_tot_h   = self._tile_h + self._text_h
+
+        # Full canvas
+        H = self._viz_rows * self._tile_tot_h
+        W = self._viz_cols * self._tile_w
+        self._viz_canvas   = np.zeros((H, W, 3), dtype=np.uint8)
+
+        # Next slot to fill
+        self._viz_next_idx = 0
+    
+    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False):
         """
-        Show a HxW torch silhouette mask in the single OpenCV window.
+        Place one 640x480 silhouette into the next cell of the fixed grid,
+        with a subtitle:  “Pose: x, y, z, yaw  |  Gain: ##”.
         """
-        # 1. tensor → uint8 0/255 on CPU
+
+        # Reset on first tile of a new 8-pose batch
+        if reset:
+            self._viz_canvas.fill(0)
+            self._viz_next_idx = 0
+
+        # Safety guard
+        if self._viz_next_idx >= self._viz_cols * self._viz_rows:
+            return
+
+        # Prepare miniature mask
         mask = (sil_tensor > 0.5).cpu().numpy().astype(np.uint8) * 255
+        mini = cv2.resize(mask, (self._tile_w, self._tile_h),
+                          interpolation=cv2.INTER_NEAREST)
+        mini = cv2.cvtColor(mini, cv2.COLOR_GRAY2BGR)
 
-        # 2. keep aspect ratio, scale so that height == self._viz_target
-        h, w = mask.shape
-        scale = self._viz_target / float(h)
-        disp  = cv2.resize(mask, (int(w*scale), self._viz_target),
-                        interpolation=cv2.INTER_NEAREST)
+        # Generate caption
+        x, y, z = pose_vec[:3]
+        qx, qy, qz, qw = pose_vec[3:]
+        siny  = 2 * (qw*qz + qx*qy)
+        cosy  = 1 - 2 * (qy*qy + qz*qz)
+        yaw   = math.degrees(math.atan2(siny, cosy))
 
-        # 3. convert 1-channel to BGR so it shows up as white / black
-        disp = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
-        cv2.imshow(self._viz_name, disp)
+        caption = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.0f}"
+        strip   = np.zeros((self._text_h, self._tile_w, 3), np.uint8)
+        cv2.putText(strip, caption, (2, self._text_h - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,255), 1,
+                    lineType=cv2.LINE_AA)
+
+        tile = np.vstack([mini, strip]) # (tile_tot_h × tile_w × 3)
+
+        # Paste into canvas
+        r = self._viz_next_idx // self._viz_cols
+        c = self._viz_next_idx %  self._viz_cols
+        y0, y1 = r * self._tile_tot_h, (r + 1) * self._tile_tot_h
+        x0, x1 = c * self._tile_w,     (c + 1) * self._tile_w
+        self._viz_canvas[y0:y1, x0:x1] = tile
+        self._viz_next_idx += 1
+
+        # Show canvas
+        cv2.imshow(self._viz_name, self._viz_canvas)
         cv2.waitKey(1)
 
 
