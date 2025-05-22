@@ -1413,6 +1413,10 @@ class RosHandler:
 
         with torch.no_grad():
             for sil_idx, vec in enumerate(pose_arr):
+                # Define gain factors
+                k_fisher = 1
+                k_sil = 50
+                
                 # Compute relative poses
                 pose_mat = self.pose_matrix_from_quaternion(vec)
                 pose_mat = torch.from_numpy(pose_mat).float().cuda()
@@ -1429,14 +1433,18 @@ class RosHandler:
                 # Compute Fisher Information gains
                 with torch.enable_grad():
                     g_fisher, eig, loc = self.compute_eig(pose, cam_data)
+                
+                # Scale gains
+                g_sil *= k_sil
+                g_fisher *= k_fisher
 
                 # Compute mixed gains
-                g = g_fisher # + g_sil
+                g = g_fisher + g_sil
                 gains.append(g)
 
                 # Visualize renders
                 if SIL_VIZ:
-                    self._show_silhouette(sil, pose_vec=vec, gain=g, reset=(sil_idx == 0), eig=eig, loc=loc)
+                    self._show_silhouette(sil, pose_vec=vec, gain=g, reset=(sil_idx == 0), g_fisher=g_fisher, g_sil=g_sil)
                 if RGB_VIZ and (rgb_render is not None):
                     self._show_render(rgb_render, pose_vec=vec, gain=g, reset=(sil_idx == 0))
         
@@ -1599,7 +1607,7 @@ class RosHandler:
             x0:x0 + self._cell_w] = tile
         return next_idx + 1
 
-    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False, eig=None, loc=None):
+    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False, g_fisher=None, g_sil=None):
         if reset:
             self._sil_canvas.fill(0)
             self._sil_next_idx = 0
@@ -1614,8 +1622,8 @@ class RosHandler:
         yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
                                     1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
         
-        if eig is not None:
-            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gain:.1f} | EI: {eig:.1f} | LOC: {loc:.1f}"
+        if g_fisher is not None:
+            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gain:.1f} | FI: {g_fisher:.1f} | SIL: {g_sil:.1f}"
         else:
             cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} deg | G: {gain:.1f}"
 
