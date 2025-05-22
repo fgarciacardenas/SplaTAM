@@ -1225,9 +1225,9 @@ def make_occupancy_grid(
     return occ, extent
 
 
-def _make_canvas(cols, rows, cell_w, cell_h, text_h):
-    H = rows * (cell_h + text_h)
-    W = cols * cell_w
+def _make_canvas(cols, rows, cell_w, cell_h, text_h, pad):
+    H = rows * (cell_h + text_h) + (rows - 1) * pad
+    W = cols *  cell_w           + (cols - 1) * pad
     return np.zeros((H, W, 3), np.uint8)
 
 
@@ -1258,14 +1258,17 @@ class RosHandler:
         self._cell_w = 480
         self._cell_h = 640
         self._text_h = 32
+        self._pad = 12
 
         # separate state for each window
         self._sil_canvas = _make_canvas(self._cols, self._rows,
-                                        self._cell_w, self._cell_h, self._text_h)
+                                        self._cell_w, self._cell_h,
+                                        self._text_h, self._pad)
         self._sil_next_idx = 0
 
         self._rgb_canvas = _make_canvas(self._cols, self._rows,
-                                        self._cell_w, self._cell_h, self._text_h)
+                                        self._cell_w, self._cell_h,
+                                        self._text_h, self._pad)
         self._rgb_next_idx = 0
 
         # Silhouette request
@@ -1585,13 +1588,15 @@ class RosHandler:
         return np.vstack([img, strip])
 
     def _blit_tile(self, canvas, next_idx, tile):
-        # Construct canvas
         r = next_idx // self._cols
         c = next_idx %  self._cols
-        y0 = r * (self._cell_h + self._text_h)
-        x0 = c * self._cell_w
-        canvas[y0:y0+self._cell_h+self._text_h,
-            x0:x0+self._cell_w] = tile
+
+        # where the tile starts (upper-left corner)
+        y0 = r * (self._cell_h + self._text_h + self._pad)
+        x0 = c * (self._cell_w             + self._pad)
+
+        canvas[y0:y0 + self._cell_h + self._text_h,
+            x0:x0 + self._cell_w] = tile
         return next_idx + 1
 
     def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False, eig=None, loc=None):
@@ -1610,9 +1615,9 @@ class RosHandler:
                                     1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
         
         if eig is not None:
-            cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.1f} | EIG: {eig:.1f} | LOC: {loc:.1f}"
+            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gain:.1f} | EI: {eig:.1f} | LOC: {loc:.1f}"
         else:
-            cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.1f}"
+            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} deg | G: {gain:.1f}"
 
         tile = self._build_tile(mask, cap)
         self._sil_next_idx = self._blit_tile(self._sil_canvas, self._sil_next_idx, tile)
@@ -1787,7 +1792,7 @@ class RosHandler:
         # Combine gain terms
         eig_gain = 2.0
         score = eig_scene - eig_gain * loc_cost
-        return score.item(), eig_scene.item(), loc_cost.item()
+        return -score.item(), eig_scene.item(), loc_cost.item()
 
 
 def dump_realtime_dataset(dataset, out_dir):
