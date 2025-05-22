@@ -57,7 +57,7 @@ STREAM_VIZ = False
 DUMP_DATA = False
 SIL_VIZ  = False  # Show Silhouette image
 RGB_VIZ  = False  # Show RGB render image
-GRID_VIZ = True   # Show XY occupancy grid
+GRID_VIZ = False  # Show XY occupancy grid
 
 OCC_SCALE = 30            # px per grid cell (30: every 0.5 m cell becomes 30×30 px)
 PT_COLOR  = (0, 255, 255) # 2D point color (BGR – cyan)
@@ -1074,6 +1074,53 @@ def rgbd_slam(config: dict):
         wandb.finish()
 
 
+def transform_gaussians(params: dict, cam_pose: torch.Tensor,
+                        requires_grad: bool = False) -> dict:
+    """
+    Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
+    
+    Args:
+        params: dict of parameters
+        cam_pose: camera pose
+        requires_grad: flag whether to keep gradients attached
+    
+    Returns:
+        transformed_gaussians: Gaussians in the camera frame
+    """
+
+    # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
+    if params['log_scales'].shape[1] == 1:
+        transform_rots = False # Isotropic Gaussians
+    else:
+        transform_rots = True # Anisotropic Gaussians
+    
+    # Get Centers and Unnorm Rots of Gaussians in World Frame
+    pts = params['means3D']
+    unnorm_rots = params['unnorm_rotations']
+
+    # Detach or keep gradients
+    if not requires_grad:
+        pts = pts.detach()
+        unnorm_rots = unnorm_rots.detach()
+    
+    # Transform Centers of Gaussians to Camera Frame
+    transformed_gaussians = {}
+    pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+    pts4 = torch.cat((pts, pts_ones), dim=1)
+    transformed_pts = (cam_pose @ pts4.T).T[:, :3]
+    transformed_gaussians['means3D'] = transformed_pts
+
+    # Transform Rots of Gaussians to Camera Frame
+    if transform_rots:
+        norm_rots = F.normalize(unnorm_rots)
+        transformed_rots = quat_mult(matrix_to_quaternion(cam_pose[:3,:3]), norm_rots)
+        transformed_gaussians['unnorm_rotations'] = transformed_rots
+    else:
+        transformed_gaussians['unnorm_rotations'] = unnorm_rots
+
+    return transformed_gaussians
+    
+
 def get_silhouette(params, cam_pose, cam_data, _render = False):
     """
     Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
@@ -1089,31 +1136,8 @@ def get_silhouette(params, cam_pose, cam_data, _render = False):
         rgb_render: RGB rendered image (optional, default: None)
     """
     with torch.no_grad():
-        # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
-        if params['log_scales'].shape[1] == 1:
-            transform_rots = False # Isotropic Gaussians
-        else:
-            transform_rots = True # Anisotropic Gaussians
-        
-        # Get Centers and Unnorm Rots of Gaussians in World Frame
-        pts = params['means3D'].detach()
-        unnorm_rots = params['unnorm_rotations'].detach()
-        
-        # Transform Centers of Gaussians to Camera Frame
-        transformed_gaussians = {}
-        pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
-        pts4 = torch.cat((pts, pts_ones), dim=1)
-        transformed_pts = (cam_pose @ pts4.T).T[:, :3]
-        transformed_gaussians['means3D'] = transformed_pts
-
-        # Transform Rots of Gaussians to Camera Frame
-        if transform_rots:
-            from scipy.spatial.transform import Rotation as R
-            norm_rots = F.normalize(unnorm_rots)
-            transformed_rots = quat_mult(R.from_matrix(cam_pose[:3,:3]).as_quat(), norm_rots)
-            transformed_gaussians['unnorm_rotations'] = transformed_rots
-        else:
-            transformed_gaussians['unnorm_rotations'] = unnorm_rots
+        # Transform Gaussians from world frame to camera frame
+        transformed_gaussians = transform_gaussians(params, cam_pose, requires_grad = False)
 
         # Initialize Render Variables
         if _render:
@@ -1381,24 +1405,39 @@ class RosHandler:
 
         # Now process each collected pose
         pose_arr = self.gs_poses.popleft()
-        with torch.no_grad():
-            gains = []
-            cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+        gains    = []
+        cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
 
+        with torch.no_grad():
             for sil_idx, vec in enumerate(pose_arr):
+                # Compute relative poses
                 pose_mat = self.pose_matrix_from_quaternion(vec)
                 pose_mat = torch.from_numpy(pose_mat).float().cuda()
-                pose = relative_transformation(self.initial_pose, pose_mat, orthogonal_rotations=False)
-                sil, rgb_render = get_silhouette(self.params, pose, cam_data, _render = True) # H×W tensor
-                g = float((sil < 0.5).sum().item())
+                pose     = relative_transformation(self.initial_pose, pose_mat,
+                                                   orthogonal_rotations=False)
+
+                # Compute Silhouette gains
+                sil, rgb_render = get_silhouette(self.params, pose, cam_data, _render=RGB_VIZ)
+                g_sil = float((sil < 0.5).sum().item())
+
+                # Normalize Silhouette gains by number of pixels
+                g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
+
+                # Compute Fisher Information gains
+                with torch.enable_grad():
+                    g_fisher, eig, loc = self.compute_eig(pose, cam_data)
+
+                # Compute mixed gains
+                g = g_fisher # + g_sil
                 gains.append(g)
 
+                # Visualize renders
                 if SIL_VIZ:
-                    self._show_silhouette(sil, pose_vec=vec, gain=g, reset=(sil_idx == 0))
+                    self._show_silhouette(sil, pose_vec=vec, gain=g, reset=(sil_idx == 0), eig=eig, loc=loc)
                 if RGB_VIZ and (rgb_render is not None):
                     self._show_render(rgb_render, pose_vec=vec, gain=g, reset=(sil_idx == 0))
         
-        # Publish silhouette gains
+        # Publish gains
         msg = Float32MultiArray()
         msg.data = gains
         if True: # VERBOSE
@@ -1555,7 +1594,7 @@ class RosHandler:
             x0:x0+self._cell_w] = tile
         return next_idx + 1
 
-    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False):
+    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False, eig=None, loc=None):
         if reset:
             self._sil_canvas.fill(0)
             self._sil_next_idx = 0
@@ -1569,7 +1608,11 @@ class RosHandler:
         x, y, z = pose_vec[:3]
         yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
                                     1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
-        cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.0f}"
+        
+        if eig is not None:
+            cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.1f} | EIG: {eig:.1f} | LOC: {loc:.1f}"
+        else:
+            cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.1f}"
 
         tile = self._build_tile(mask, cap)
         self._sil_next_idx = self._blit_tile(self._sil_canvas, self._sil_next_idx, tile)
@@ -1654,6 +1697,97 @@ class RosHandler:
         else:
             cv2.imshow("Occupancy", img)
         cv2.waitKey(1)
+
+    def update_global_fim(self, fim_diag: torch.Tensor, momentum: float = 0.9):
+        """
+        Keep an exponential-moving-average of the per-frame Fisher information
+        diagonal. Resize the stored vector automatically whenever the number
+        of Gaussians changes (after densification / pruning).
+        """
+        # Initial function call
+        if not hasattr(self, "_fim_global"):
+            self._fim_global = fim_diag.clone().detach() + 1e-9
+            return
+
+        # Retrieve previous and new sizes
+        old_N = self._fim_global.numel()
+        new_N = fim_diag.numel()
+
+        # Gaussian were added or pruned
+        if new_N != old_N:
+            if new_N > old_N: # If new Gaussians were added
+                # Keep running stats
+                padded = fim_diag.clone().detach()
+                padded[:old_N] = self._fim_global
+                self._fim_global = padded
+            else: # If Gaussians were pruned
+                self._fim_global = self._fim_global[:new_N]
+
+        # Exponential-moving-average update
+        self._fim_global = (momentum * self._fim_global + (1.0 - momentum) * fim_diag + 1e-9)
+
+    def compute_eig(self, pose_mat: torch.Tensor, cam_data: dict):
+        # Initialize render variables for computing scene (mapping) gradients
+        gaussians_scene = transform_gaussians(self.params, pose_mat, requires_grad=True)
+        rendervar_scene = transformed_params2rendervar(self.params, gaussians_scene)
+        rgb_scene, _, _, = Renderer(raster_settings=cam_data['cam'])(**rendervar_scene)
+
+        # Compute Fisher Information Matrix (diagonalized)
+        # The rendered RGB image rgb_scene is differentiated w.r.t. 
+        # the Gaussian parameters w_list (means3D, logit_opacities)
+        w_list = [self.params['means3D'], self.params['logit_opacities']]
+        grads  = torch.autograd.grad(
+            outputs       = rgb_scene,
+            inputs        = w_list,
+            grad_outputs  = torch.ones_like(rgb_scene),
+            create_graph  = False, retain_graph = False
+        )
+
+        # Shape FIM as 1D vector
+        fim_diag = torch.cat([(g.detach() ** 2).reshape(-1) for g in grads])
+
+        # Update global Fisher Information Matrix
+        # Dividing the current per-parameter Fisher information by the running average 
+        # implements the expected information gain (EIG) for new scene knowledge
+        self.update_global_fim(fim_diag)
+
+        # Compute the EIG of the scene
+        eig_scene = (fim_diag / self._fim_global).sum()
+
+        # Normalize EIG by number of pixels
+        eig_scene /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
+
+        # Initialize render variables for computing pose gradients
+        pose_dyn = pose_mat.clone().detach().requires_grad_(True)
+        gaussians_pose = transform_gaussians(self.params, pose_dyn, requires_grad=False)
+        rendervar_pose = transformed_params2rendervar(self.params, gaussians_pose)
+        rgb_pose, _, _ = Renderer(raster_settings=cam_data['cam'])(**rendervar_pose)
+
+        # Jacobians of camera pose with respect to the mean and covariances of each Gaussian
+        J_pose, = torch.autograd.grad(
+            outputs      = rgb_pose,
+            inputs       = pose_dyn,
+            grad_outputs = torch.ones_like(rgb_pose),
+            retain_graph = False
+        )
+
+        # If the view is uninformative, return zero gain
+        if J_pose.abs().max() == 0:
+            z = torch.tensor(0., device=pose_mat.device).item()
+            return z, eig_scene.item(), z
+
+        # Compute Cramer-Rao lower-bound surrogate for pose variance
+        Jv = J_pose.reshape(-1)
+        JJ = torch.outer(Jv, Jv) # 6x6 Fisher matrix
+        JJ64 = JJ.double()
+        eps  = 1e-3 * torch.eye(JJ.size(0), device=JJ.device, dtype=JJ64.dtype)
+        _, logabsdet = torch.linalg.slogdet(JJ64 + eps)
+        loc_cost = logabsdet.float()
+
+        # Combine gain terms
+        eig_gain = 2.0
+        score = eig_scene - eig_gain * loc_cost
+        return score.item(), eig_scene.item(), loc_cost.item()
 
 
 def dump_realtime_dataset(dataset, out_dir):
