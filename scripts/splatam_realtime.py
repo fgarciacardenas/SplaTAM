@@ -1128,23 +1128,29 @@ def plot_pose_gains(
         stop  = start + n_per_fig
         chunk = poses_top[start:stop]
 
-        fig, axes = plt.subplots(3, 1, sharex=True, figsize=(12, 8))
-        axes[0].set_title("EIG gains")
-        axes[1].set_title("SIL gains")
-        axes[2].set_title("Mixed gains")
-        axes[2].set_xlabel("time step")
+        fig, axes = plt.subplots(5, 1, sharex=True, figsize=(12, 12))
+        axes[0].set_title("SIL gains")
+        axes[1].set_title("EIG gains")
+        axes[2].set_title("LOC gains")
+        axes[3].set_title("FIM gains")
+        axes[4].set_title("Mixed gains")
+        axes[4].set_xlabel("time step")
 
         for pose_key, seq in chunk:
-            eig = np.full(T, np.nan)
             sil = np.full(T, np.nan)
+            eig = np.full(T, np.nan)
+            loc = np.full(T, np.nan)
+            fim = np.full(T, np.nan)
             mix = np.full(T, np.nan)
 
             for t, item in enumerate(seq):
                 rec = _first_dict(item)
                 if rec is None:
                     continue
-                eig[t] = rec.get("eig",  np.nan)
                 sil[t] = rec.get("sil",  np.nan)
+                eig[t] = rec.get("eig",  np.nan)
+                loc[t] = rec.get("loc",  np.nan)
+                fim[t] = rec.get("fim",  np.nan)
                 mix[t] = rec.get("gain", np.nan)
 
             label = (
@@ -1152,12 +1158,13 @@ def plot_pose_gains(
                 f"{pose_key[12:]}°"
             )
             # Draw marker so even single-point series are visible
-            axes[0].plot(x, eig, marker="o", linestyle="-", label=label)
-            axes[1].plot(x, sil, marker="o", linestyle="-", label=label)
-            axes[2].plot(x, mix, marker="o", linestyle="-", label=label)
+            axes[0].plot(x, sil, marker="o", linestyle="-", label=label)
+            axes[1].plot(x, eig, marker="o", linestyle="-", label=label)
+            axes[2].plot(x, loc, marker="o", linestyle="-", label=label)
+            axes[3].plot(x, fim, marker="o", linestyle="-", label=label)
+            axes[4].plot(x, mix, marker="o", linestyle="-", label=label)
 
-        for ax in axes:
-            ax.legend(fontsize=7, loc="upper right")
+        axes[0].legend(fontsize=7, loc="upper right")
 
         fig.tight_layout()
         fname = os.path.join(
