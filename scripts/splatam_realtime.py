@@ -4,6 +4,7 @@ import shutil
 import sys
 import time
 from importlib.machinery import SourceFileLoader
+from typing import Any, Dict, List, Tuple
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1073,6 +1074,99 @@ def rgbd_slam(config: dict):
     if config['use_wandb']:
         wandb.finish()
 
+    # Plot poses and corresponding gains
+    plot_pose_gains(ros_handler.global_gains, save_dir=output_dir + '/poses')
+
+
+def _first_dict(item: Any) -> Dict[str, float] | None:
+    """Return the first gain-dict inside *item* or None."""
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, (list, tuple)) and item:
+        return item[0] if isinstance(item[0], dict) else None
+    return None
+
+
+def plot_pose_gains(
+    gains_dict: dict,
+    n_per_fig: int = 8,
+    max_figs: int = 3,
+    save_dir: str = "/home/dev/splatam/experiments/",
+    prefix: str = "gains",
+) -> None:
+    """
+    Plot EIG, SIL and mixed gains for the *longest* sequences only.
+
+    * Keeps the top (max_figs x n_per_fig) poses ranked by sequence length.
+    * Draws ≤ max_figs figures, each with ≤ n_per_fig pose-curves.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Rank poses
+    poses_sorted : List[Tuple[str, List[Any]]] = sorted(
+        gains_dict.items(),
+        key=lambda kv: len(kv[1]),
+        reverse=True
+    )
+
+    limit = max_figs * n_per_fig
+    poses_top = poses_sorted[:limit]
+    if not poses_top:
+        print("plot_pose_gains: nothing to plot.")
+        return
+
+    # Global time horizon (longest sequence among *selected* poses)
+    T = max(len(seq) for _, seq in poses_top)
+    x = np.arange(1, T + 1)
+
+    # Generate plots
+    n_figs = math.ceil(len(poses_top) / n_per_fig)
+    n_figs = min(n_figs, max_figs)
+
+    for fig_idx in range(n_figs):
+        start = fig_idx * n_per_fig
+        stop  = start + n_per_fig
+        chunk = poses_top[start:stop]
+
+        fig, axes = plt.subplots(3, 1, sharex=True, figsize=(12, 8))
+        axes[0].set_title("EIG gains")
+        axes[1].set_title("SIL gains")
+        axes[2].set_title("Mixed gains")
+        axes[2].set_xlabel("time step")
+
+        for pose_key, seq in chunk:
+            eig = np.full(T, np.nan)
+            sil = np.full(T, np.nan)
+            mix = np.full(T, np.nan)
+
+            for t, item in enumerate(seq):
+                rec = _first_dict(item)
+                if rec is None:
+                    continue
+                eig[t] = rec.get("eig",  np.nan)
+                sil[t] = rec.get("sil",  np.nan)
+                mix[t] = rec.get("gain", np.nan)
+
+            label = (
+                f"<{pose_key[:4]}, {pose_key[4:8]}, {pose_key[8:12]}>, "
+                f"{pose_key[12:]}°"
+            )
+            # Draw marker so even single-point series are visible
+            axes[0].plot(x, eig, marker="o", linestyle="-", label=label)
+            axes[1].plot(x, sil, marker="o", linestyle="-", label=label)
+            axes[2].plot(x, mix, marker="o", linestyle="-", label=label)
+
+        for ax in axes:
+            ax.legend(fontsize=7, loc="upper right")
+
+        fig.tight_layout()
+        fname = os.path.join(
+            save_dir,
+            f"{prefix}_{fig_idx:03d}_{time.time_ns()}.png"
+        )
+        fig.savefig(fname, dpi=300)
+        plt.close(fig)
+
 
 def transform_gaussians(params: dict, cam_pose: torch.Tensor,
                         requires_grad: bool = False) -> dict:
@@ -1268,8 +1362,9 @@ class RosHandler:
                                         self._cell_w, self._cell_h,
                                         self._text_h, self._pad)
 
-        # Silhouette request
+        # Pose gain request
         self.gs_poses = collections.deque(maxlen=max_queue_size)
+        self.global_gains = {}
 
         # Queues for synchronization
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
@@ -1358,7 +1453,8 @@ class RosHandler:
             self.finished = True
 
     def _gs_poses_cb(self, msg: PoseArray):
-        rospy.loginfo(f"Received {len(msg.poses)} GS poses")
+        if VERBOSE:
+            rospy.loginfo(f"Received {len(msg.poses)} GS poses")
         pose_arr = []
         for pose_msg in msg.poses:
             pose = np.array([pose_msg.position.x/self.pose_scale, 
@@ -1418,11 +1514,11 @@ class RosHandler:
                 # Compute relative poses
                 pose_mat = self.pose_matrix_from_quaternion(vec)
                 pose_mat = torch.from_numpy(pose_mat).float().cuda()
-                pose     = relative_transformation(self.initial_pose, pose_mat,
+                pose_vec = relative_transformation(self.initial_pose, pose_mat,
                                                    orthogonal_rotations=False)
 
                 # Compute Silhouette gains
-                sil, rgb_render = get_silhouette(self.params, pose, cam_data, _render=RGB_VIZ)
+                sil, rgb_render = get_silhouette(self.params, pose_vec, cam_data, _render=RGB_VIZ)
                 g_sil = float((sil < 0.5).sum().item())
 
                 # Normalize Silhouette gains by number of pixels
@@ -1430,7 +1526,7 @@ class RosHandler:
 
                 # Compute Fisher Information gains
                 with torch.enable_grad():
-                    g_fisher, eig, loc = self.compute_eig(pose, cam_data)
+                    g_fisher, eig, loc = self.compute_eig(pose_vec, cam_data)
                 
                 # Scale gains
                 g_sil *= k_sil
@@ -1441,13 +1537,26 @@ class RosHandler:
                 gains.append(g)
 
                 # Gains dictionary
-                gains_arr.append({
+                gains_dict = {
                     'sil': g_sil,
                     'eig': eig,
                     'loc': loc,
                     'fim': g_fisher,
                     'gain': g
-                })
+                }
+                gains_arr.append(gains_dict)
+
+                # Compute yaw angle
+                yaw = math.degrees(math.atan2(2*(vec[6]*vec[5] + vec[3]*vec[4]),
+                                              1 - 2*(vec[4]**2 + vec[5]**2)))
+                
+                # Compute dictionary key
+                key = f"{vec[0]:.2f}{vec[1]:.2f}{vec[2]:.2f}{yaw:.0f}"
+                
+                # Store poses and corresponding gains
+                if key not in self.global_gains:
+                    self.global_gains[key] = []
+                self.global_gains[key].append(gains_dict)
 
                 # Visualize renders
                 if SIL_VIZ:
