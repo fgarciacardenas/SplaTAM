@@ -55,8 +55,8 @@ import collections
 VERBOSE = False
 STREAM_VIZ = False
 DUMP_DATA = False
-SIL_VIZ  = False  # Show Silhouette image
-RGB_VIZ  = False  # Show RGB render image
+SIL_VIZ  = True   # Show Silhouette image
+RGB_VIZ  = True   # Show RGB render image
 GRID_VIZ = False  # Show XY occupancy grid
 
 OCC_SCALE = 30            # px per grid cell (30: every 0.5 m cell becomes 30×30 px)
@@ -1415,7 +1415,7 @@ class RosHandler:
             for sil_idx, vec in enumerate(pose_arr):
                 # Define gain factors
                 k_fisher = 1
-                k_sil = 50
+                k_sil = 300
                 
                 # Compute relative poses
                 pose_mat = self.pose_matrix_from_quaternion(vec)
@@ -1442,11 +1442,20 @@ class RosHandler:
                 g = g_fisher + g_sil
                 gains.append(g)
 
+                # Gains dictionary
+                gains_dict = {
+                    'sil': g_sil,
+                    'eig': eig,
+                    'loc': loc,
+                    'fim': g_fisher,
+                    'gain': g
+                }
+
                 # Visualize renders
                 if SIL_VIZ:
-                    self._show_silhouette(sil, pose_vec=vec, gain=g, reset=(sil_idx == 0), g_fisher=g_fisher, g_sil=g_sil)
+                    self._show_silhouette(sil, pose_vec=vec, gains=gains_dict, reset=(sil_idx == 0))
                 if RGB_VIZ and (rgb_render is not None):
-                    self._show_render(rgb_render, pose_vec=vec, gain=g, reset=(sil_idx == 0))
+                    self._show_render(rgb_render, pose_vec=vec, gains=gains_dict, reset=(sil_idx == 0), mode=2)
         
         # Publish gains
         msg = Float32MultiArray()
@@ -1454,8 +1463,6 @@ class RosHandler:
         if True: # VERBOSE
             rospy.loginfo(f"Publishing gains {gains} for position [{pose_arr[0][0]:.2f}, {pose_arr[0][1]:.2f}, {pose_arr[0][2]:.2f}]...")
         self.gain_pub.publish(msg)
-        
-        #self.gs_poses.clear()
 
     def associate_frames(self, t_rgb, t_depth, t_pose):
         matches = []
@@ -1607,7 +1614,7 @@ class RosHandler:
             x0:x0 + self._cell_w] = tile
         return next_idx + 1
 
-    def _show_silhouette(self, sil_tensor, pose_vec, gain, reset=False, g_fisher=None, g_sil=None):
+    def _show_silhouette(self, sil_tensor, pose_vec, gains, reset=False, mode=1):
         if reset:
             self._sil_canvas.fill(0)
             self._sil_next_idx = 0
@@ -1621,18 +1628,20 @@ class RosHandler:
         x, y, z = pose_vec[:3]
         yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
                                     1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
+
+        cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains['gain']:.1f}"
         
-        if g_fisher is not None:
-            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gain:.1f} | FI: {g_fisher:.1f} | SIL: {g_sil:.1f}"
+        if mode == 1:
+            cap += f" | FIM: {gains['fim']:.1f} | SIL: {gains['sil']:.1f}"
         else:
-            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} deg | G: {gain:.1f}"
+            cap += f" | EIG: {gains['eig']:.1f} | LOC: {gains['loc']:.1f}"
 
         tile = self._build_tile(mask, cap)
         self._sil_next_idx = self._blit_tile(self._sil_canvas, self._sil_next_idx, tile)
         cv2.imshow("Silhouettes", self._sil_canvas)
         cv2.waitKey(1)
 
-    def _show_render(self, rgb_tensor, pose_vec, gain, reset=False):
+    def _show_render(self, rgb_tensor, pose_vec, gains, reset=False, mode=1):
         if reset:
             self._rgb_canvas.fill(0)
             self._rgb_next_idx = 0
@@ -1646,7 +1655,13 @@ class RosHandler:
         x, y, z = pose_vec[:3]
         yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
                                     1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
-        cap = f"Pose: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.1f} deg | Gain: {gain:.0f}"
+        
+        cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains['gain']:.1f}"
+        
+        if mode == 1:
+            cap += f" | FIM: {gains['fim']:.1f} | SIL: {gains['sil']:.1f}"
+        else:
+            cap += f" | EIG: {gains['eig']:.1f} | LOC: {gains['loc']:.1f}"
 
         tile = self._build_tile(rgb, cap)
         self._rgb_next_idx = self._blit_tile(self._rgb_canvas, self._rgb_next_idx, tile)
