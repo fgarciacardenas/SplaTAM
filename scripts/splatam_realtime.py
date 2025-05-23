@@ -1264,12 +1264,9 @@ class RosHandler:
         self._sil_canvas = _make_canvas(self._cols, self._rows,
                                         self._cell_w, self._cell_h,
                                         self._text_h, self._pad)
-        self._sil_next_idx = 0
-
         self._rgb_canvas = _make_canvas(self._cols, self._rows,
                                         self._cell_w, self._cell_h,
                                         self._text_h, self._pad)
-        self._rgb_next_idx = 0
 
         # Silhouette request
         self.gs_poses = collections.deque(maxlen=max_queue_size)
@@ -1409,6 +1406,7 @@ class RosHandler:
         # Now process each collected pose
         pose_arr = self.gs_poses.popleft()
         gains    = []
+        sil_arr, rgb_arr, gains_arr = [], [], []
         cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
 
         with torch.no_grad():
@@ -1443,19 +1441,26 @@ class RosHandler:
                 gains.append(g)
 
                 # Gains dictionary
-                gains_dict = {
+                gains_arr.append({
                     'sil': g_sil,
                     'eig': eig,
                     'loc': loc,
                     'fim': g_fisher,
                     'gain': g
-                }
+                })
 
                 # Visualize renders
                 if SIL_VIZ:
-                    self._show_silhouette(sil, pose_vec=vec, gains=gains_dict, reset=(sil_idx == 0))
-                if RGB_VIZ and (rgb_render is not None):
-                    self._show_render(rgb_render, pose_vec=vec, gains=gains_dict, reset=(sil_idx == 0), mode=2)
+                    sil_arr.append(sil)
+                if RGB_VIZ:
+                    rgb_arr.append(rgb_render)
+
+                if sil_idx == (len(pose_arr) - 1):
+                    if SIL_VIZ:
+                        self._show_silhouette(sil_arr, pose_arr, gains_arr)
+                    if RGB_VIZ and (rgb_arr[0] is not None):
+                        self._show_render(rgb_arr, pose_arr, gains_arr, mode=2)
+                    sil_arr, rgb_arr  = [], []
         
         # Publish gains
         msg = Float32MultiArray()
@@ -1614,57 +1619,56 @@ class RosHandler:
             x0:x0 + self._cell_w] = tile
         return next_idx + 1
 
-    def _show_silhouette(self, sil_tensor, pose_vec, gains, reset=False, mode=1):
-        if reset:
-            self._sil_canvas.fill(0)
-            self._sil_next_idx = 0
+    def _show_silhouette(self, sil_tensor, pose_arr, gains, mode=1):
+        # Loop through all poses in pose_arr and add their silhouette images to the grid
+        for idx, pose_vec in enumerate(pose_arr):
+            mask = (sil_tensor[idx] < .5).cpu().numpy().astype(np.uint8) * 255
+            mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-        if self._sil_next_idx >= self._cols * self._rows:
-            return
+            # Prepare the caption for the pose
+            x, y, z = pose_vec[:3]
+            yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
+                                          1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
+            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains[idx]['gain']:.1f}"
 
-        mask = (sil_tensor < .5).cpu().numpy().astype(np.uint8) * 255
-        mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            # Choose which gains to display in the caption
+            if mode == 1:
+                cap += f" | FIM: {gains[idx]['fim']:.1f} | SIL: {gains[idx]['sil']:.1f}"
+            else:
+                cap += f" | EIG: {gains[idx]['eig']:.1f} | LOC: {gains[idx]['loc']:.1f}"
 
-        x, y, z = pose_vec[:3]
-        yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
-                                    1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
-
-        cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains['gain']:.1f}"
+            # Add the image to the canvas in the correct position
+            tile = self._build_tile(mask, cap)
+            self._blit_tile(self._sil_canvas, idx, tile)
         
-        if mode == 1:
-            cap += f" | FIM: {gains['fim']:.1f} | SIL: {gains['sil']:.1f}"
-        else:
-            cap += f" | EIG: {gains['eig']:.1f} | LOC: {gains['loc']:.1f}"
-
-        tile = self._build_tile(mask, cap)
-        self._sil_next_idx = self._blit_tile(self._sil_canvas, self._sil_next_idx, tile)
+        # Show the complete canvas with all the silhouettes
         cv2.imshow("Silhouettes", self._sil_canvas)
         cv2.waitKey(1)
 
-    def _show_render(self, rgb_tensor, pose_vec, gains, reset=False, mode=1):
-        if reset:
-            self._rgb_canvas.fill(0)
-            self._rgb_next_idx = 0
 
-        if self._rgb_next_idx >= self._cols * self._rows:
-            return
+    def _show_render(self, rgb_tensor, pose_arr, gains, mode=1):
+        # Loop through all poses in pose_arr and add their RGB renders to the grid
+        for idx, pose_vec in enumerate(pose_arr):
+            rgb = (rgb_tensor[idx].clamp(0,1).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
-        rgb = (rgb_tensor.clamp(0,1).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
-        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            # Prepare the caption for the pose
+            x, y, z = pose_vec[:3]
+            yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
+                                          1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
+            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains[idx]['gain']:.1f}"
 
-        x, y, z = pose_vec[:3]
-        yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
-                                    1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
-        
-        cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains['gain']:.1f}"
-        
-        if mode == 1:
-            cap += f" | FIM: {gains['fim']:.1f} | SIL: {gains['sil']:.1f}"
-        else:
-            cap += f" | EIG: {gains['eig']:.1f} | LOC: {gains['loc']:.1f}"
+            # Choose which gains to display in the caption
+            if mode == 1:
+                cap += f" | FIM: {gains[idx]['fim']:.1f} | SIL: {gains[idx]['sil']:.1f}"
+            else:
+                cap += f" | EIG: {gains[idx]['eig']:.1f} | LOC: {gains[idx]['loc']:.1f}"
 
-        tile = self._build_tile(rgb, cap)
-        self._rgb_next_idx = self._blit_tile(self._rgb_canvas, self._rgb_next_idx, tile)
+            # Add the image to the canvas in the correct position
+            tile = self._build_tile(rgb, cap)
+            self._blit_tile(self._rgb_canvas, idx, tile)
+
+        # Show the complete canvas with all the RGB renders
         cv2.imshow("Renders", self._rgb_canvas)
         cv2.waitKey(1)
 
