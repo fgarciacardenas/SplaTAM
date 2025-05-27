@@ -1406,6 +1406,8 @@ class RosHandler:
                          self._trigger_cb, queue_size=1)
         rospy.Subscriber('/ifpp/finished_signal', Bool,
                          self._finished_cb, queue_size=1)
+        rospy.Subscriber('stop_planning_and_GSplat', Bool,
+                         self._terminate_cb, queue_size=1)
         rospy.Subscriber('/ifpp/gs_poses', PoseArray,
                          self._gs_poses_cb, queue_size=1)
         
@@ -1456,6 +1458,10 @@ class RosHandler:
             #self.gs_poses.clear()
 
     def _finished_cb(self, msg: Bool):
+        if msg.data:
+            self.finished = True
+
+    def _terminate_cb(self, msg: Bool):
         if msg.data:
             self.finished = True
 
@@ -1540,7 +1546,7 @@ class RosHandler:
                 g_fisher *= k_fisher
 
                 # Compute mixed gains
-                g = g_fisher + g_sil
+                g = (g_fisher + g_sil) * 5
                 gains.append(g)
 
                 # Gains dictionary
