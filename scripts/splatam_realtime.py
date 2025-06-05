@@ -1077,6 +1077,13 @@ def rgbd_slam(config: dict):
     # Plot poses and corresponding gains
     plot_pose_gains(ros_handler.global_gains, save_dir=output_dir + '/poses')
 
+    # Plot <value> vs PSNR
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="sil", axis_name="SIL", prefix="psnr_sil", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="eig", axis_name="EIG", prefix="psnr_eig", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="loc", axis_name="LOC", prefix="psnr_loc", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="fim", axis_name="FIM", prefix="psnr_fim", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="gain", axis_name="SUM", prefix="psnr_sum", save_dir=output_dir + '/psnr_plots')
+
 
 def _first_dict(item: Any) -> Dict[str, float] | None:
     """Return the first gain-dict inside *item* or None."""
@@ -1173,6 +1180,39 @@ def plot_pose_gains(
         )
         fig.savefig(fname, dpi=300)
         plt.close(fig)
+
+
+def plot_value_psnr(
+    gains_arr: list,
+    value: str = "eig",
+    axis_name: str = "EIG",
+    save_dir: str = "/home/dev/splatam/experiments/",
+    prefix: str = "psnr_eig",
+) -> None:
+    """
+    Plot <value> vs PSNR.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    if not gains_arr:
+        print("plot_<value>_psnr: nothing to plot.")
+        return
+
+    # Extract <value> and PSNR values
+    values = [g[value] for g in gains_arr]
+    psnr_values = [g["psnr"] for g in gains_arr]
+
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.scatter(psnr_values, values, alpha=0.8)
+    ax.set_xlabel("PSNR")
+    ax.set_ylabel(f"{axis_name}")
+    ax.set_title(f"{axis_name} vs PSNR")
+
+    # Save the figure
+    fname = os.path.join(save_dir, f"{prefix}_{time.time_ns()}.png")
+    fig.savefig(fname, dpi=300)
+    plt.close(fig)
 
 
 def transform_gaussians(params: dict, cam_pose: torch.Tensor,
