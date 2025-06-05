@@ -34,7 +34,7 @@ from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion
 )
-from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
+from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify, calc_psnr
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from datasets.gradslam_datasets.geometryutils import relative_transformation
@@ -56,9 +56,10 @@ import collections
 VERBOSE = False
 STREAM_VIZ = False
 DUMP_DATA = False
-SIL_VIZ  = True   # Show Silhouette image
-RGB_VIZ  = True   # Show RGB render image
+SIL_VIZ  = False  # Show Silhouette image
+RGB_VIZ  = False  # Show RGB render image
 GRID_VIZ = False  # Show XY occupancy grid
+CURR_VIZ = True   # Show current frame render image
 
 OCC_SCALE = 30            # px per grid cell (30: every 0.5 m cell becomes 30×30 px)
 PT_COLOR  = (0, 255, 255) # 2D point color (BGR – cyan)
@@ -1238,7 +1239,7 @@ def get_silhouette(params, cam_pose, cam_data, _render = False):
     """
     with torch.no_grad():
         # Transform Gaussians from world frame to camera frame
-        transformed_gaussians = transform_gaussians(params, cam_pose, requires_grad = False)
+        transformed_gaussians = transform_gaussians(params, torch.linalg.inv(cam_pose), requires_grad = False)
 
         # Initialize Render Variables
         if _render:
@@ -1337,12 +1338,19 @@ class RosHandler:
         # Parameters
         self.max_dt = max_dt
         self.max_queue_size = max_queue_size
-        self.pose_scale = 10.0
 
         # Camera objects
         self.cam     = None
         self.w2c_ref = None
         self.params  = None
+
+        # Rotate camera_frame to camera_optical_frame
+        self.r_cam_to_opt = Rotation.from_quat([-0.5, 0.5, -0.5, 0.5])
+
+        # Define gain factors
+        self.k_fisher = 1
+        self.k_sil = 300
+        self.k_sum = 5
 
         # Initialize visualization window
         if SIL_VIZ:
@@ -1372,6 +1380,7 @@ class RosHandler:
         # Pose gain request
         self.gs_poses = collections.deque(maxlen=max_queue_size)
         self.global_gains = {}
+        self.gain_psnr_arr = []
 
         # Queues for synchronization
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
@@ -1445,11 +1454,19 @@ class RosHandler:
 
     def _pose_cb(self, msg: Odometry):
         if not self.map_ready: return
-        ts = self._ts_ns(msg.header)
+        ts  = self._ts_ns(msg.header)
         pos = msg.pose.pose.position
         ori = msg.pose.pose.orientation
-        arr = [pos.x/self.pose_scale, pos.y/self.pose_scale, pos.z/self.pose_scale,
-               ori.x, ori.y, ori.z, ori.w]
+
+        # Compute orientation rotated into optical frame
+        q_cam = np.array([ori.x, ori.y, ori.z, ori.w])
+        r_cam = Rotation.from_quat(q_cam)
+        r_opt = r_cam * self.r_cam_to_opt
+        q_opt = r_opt.as_quat()
+
+        # Generate pose array
+        arr = np.array([pos.x, pos.y, pos.z, *q_opt], dtype=np.float32)
+
         self.pose_queue.append({'ts': ts, 'arr': arr})
 
     def _trigger_cb(self, msg: Bool):
@@ -1470,11 +1487,18 @@ class RosHandler:
             rospy.loginfo(f"Received {len(msg.poses)} GS poses")
         pose_arr = []
         for pose_msg in msg.poses:
-            pose = np.array([pose_msg.position.x/self.pose_scale, 
-                             pose_msg.position.y/self.pose_scale, 
-                             pose_msg.position.z/self.pose_scale,
-                             pose_msg.orientation.x, pose_msg.orientation.y,
-                             pose_msg.orientation.z, pose_msg.orientation.w], dtype=np.float32)
+            # Compute orientation rotated into optical frame
+            q_cam = np.array([pose_msg.orientation.x, pose_msg.orientation.y,
+                              pose_msg.orientation.z, pose_msg.orientation.w])
+            r_cam = Rotation.from_quat(q_cam)
+            r_opt = r_cam * self.r_cam_to_opt
+            q_opt = r_opt.as_quat()
+
+            # Generate pose array
+            pose = np.array([pose_msg.position.x, 
+                             pose_msg.position.y, 
+                             pose_msg.position.z, 
+                             *q_opt], dtype=np.float32)
             pose_arr.append(pose)
         pose_arr = np.array(pose_arr)
         self.gs_poses.append(pose_arr)
@@ -1520,10 +1544,6 @@ class RosHandler:
 
         with torch.no_grad():
             for sil_idx, vec in enumerate(pose_arr):
-                # Define gain factors
-                k_fisher = 1
-                k_sil = 300
-                
                 # Compute relative poses
                 pose_mat = self.pose_matrix_from_quaternion(vec)
                 pose_mat = torch.from_numpy(pose_mat).float().cuda()
@@ -1538,15 +1558,18 @@ class RosHandler:
                 g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
 
                 # Compute Fisher Information gains
-                with torch.enable_grad():
-                    g_fisher, eig, loc = self.compute_eig(pose_vec, cam_data)
+                if self.k_fisher != 0:
+                    with torch.enable_grad():
+                        g_fisher, eig, loc = self.compute_eig(pose_vec, cam_data)
+                else:
+                    g_fisher, eig, loc = 0, 0, 0
                 
                 # Scale gains
-                g_sil *= k_sil
-                g_fisher *= k_fisher
+                g_sil *= self.k_sil
+                g_fisher *= self.k_fisher
 
                 # Compute mixed gains
-                g = (g_fisher + g_sil) * 5
+                g = self.k_sum * (g_fisher + g_sil)
                 gains.append(g)
 
                 # Gains dictionary
@@ -1638,7 +1661,7 @@ class RosHandler:
         # Remove values large than max depth
         # print("Depth min pre: ", depth.min().item())
         # print("Depth max pre: ", depth.max().item())
-        depth[depth >= 0.95] = -1
+        depth[depth >= 9.5] = -1
         # print("Depth min post: ", depth.min().item())
         # print("Depth max post: ", depth.max().item())
 
@@ -1655,6 +1678,59 @@ class RosHandler:
         if STREAM_VIZ:
             self.plot_images(color, depth)
 
+        # Optional: Visualize the Silhouette and RGB render
+        if CURR_VIZ and (self.params is not None):
+            # Process RGB-D Data
+            post_color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+            post_depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+            
+            # Compute Silhouette and RGB render (before mapping)
+            cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+            sil, rgb_render = get_silhouette(self.params, trans_pose, cam_data, _render=True)
+            
+            # Mask invalid depth in GT
+            valid_depth_mask = (post_depth > 0)
+
+            # Compute PSNR
+            weighted_im = rgb_render * valid_depth_mask
+            weighted_gt_im = post_color * valid_depth_mask
+            psnr = calc_psnr(weighted_im, weighted_gt_im).mean().cpu().numpy()
+
+            # Compute Silhouette gains
+            g_sil = float((sil < 0.5).sum().item())
+
+            # Normalize Silhouette gains by number of pixels
+            g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
+
+            # Compute Fisher Information gains
+            if self.k_fisher != 0:
+                with torch.enable_grad():
+                    g_fisher, eig, loc = self.compute_eig(trans_pose, cam_data)
+            else:
+                g_fisher, eig, loc = 0, 0, 0
+            
+            # Scale gains
+            g_sil *= self.k_sil
+            g_fisher *= self.k_fisher
+
+            # Compute mixed gains
+            g = 5 * (g_fisher + g_sil)
+            
+            # Store poses with corresponding gains and psnr
+            gains_dict = {
+                'pose': pose,
+                'sil': g_sil,
+                'eig': eig,
+                'loc': loc,
+                'fim': g_fisher,
+                'gain': g,
+                'psnr': psnr
+            }
+            self.gain_psnr_arr.append(gains_dict)
+
+            # Plot previous renders and new view
+            self.plot_renders(rgb_render, sil, color, gains_dict)
+
         if self.first_dataframe is None:
             self.first_dataframe = (color, depth, intrinsics, trans_pose)
 
@@ -1667,8 +1743,7 @@ class RosHandler:
         for _ in range(k+1): self.pose_queue.popleft()
 
     def pose_matrix_from_quaternion(self, arr):
-        cam2opt = Rotation.from_euler('ZYX', [-np.pi/2,0,-np.pi/2])
-        rot = Rotation.from_quat(arr[3:]) * cam2opt
+        rot = Rotation.from_quat(arr[3:])
         mat = np.eye(4)
         mat[:3,:3] = rot.as_matrix()
         mat[:3,3]  = arr[:3]
@@ -1714,6 +1789,71 @@ class RosHandler:
             if VERBOSE:
                 rospy.logwarn("No Depth data yet.")
         
+        cv2.waitKey(1)
+
+    def plot_renders(self, rgb_render, sil_render, rgb_img, gains):
+        """
+        Visualise (render RGB, silhouette mask, ground-truth RGB) side-by-side.
+        """
+        # Helper: Tensor/np-array → BGR uint8
+        def _to_bgr_u8(t):
+            """Handle (C,H,W) or (H,W) tensors / numpy; output BGR uint8."""
+            if torch.is_tensor(t):
+                arr = t.detach().cpu()
+                if arr.ndim == 3:              # (C,H,W) or (H,W,C)
+                    if arr.shape[0] in (3, 4): # channel-first
+                        arr = arr.permute(1, 2, 0)
+                    arr = arr.numpy()
+                else:                          # (H,W)
+                    arr = arr.numpy()
+            else:
+                arr = t                         # already numpy
+
+            if arr.ndim == 2:                   # grayscale → 3-ch
+                arr = (arr < 0.5).astype(np.uint8) * 255
+                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+            else:
+                # float 0-1 or 0-255?  make sure we end in 0-255 uint8
+                if arr.dtype != np.uint8:
+                    maxv = arr.max()
+                    if maxv <= 1.0:
+                        arr = (arr * 255)
+                    arr = arr.clip(0, 255).astype(np.uint8)
+                # RGB → BGR for OpenCV
+                if arr.shape[2] == 3:
+                    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            return arr
+
+        img_render = _to_bgr_u8(rgb_render)
+        img_sil    = _to_bgr_u8(sil_render)
+        img_rgb    = _to_bgr_u8(rgb_img)
+
+        # Normalise heights, concatenate horizontally
+        max_h = max(img_render.shape[0], img_sil.shape[0], img_rgb.shape[0])
+
+        def _pad_to_h(img, H):
+            if img.shape[0] == H:
+                return img
+            pad = np.zeros((H - img.shape[0], img.shape[1], 3), np.uint8)
+            return np.vstack([img, pad])
+
+        img_render = _pad_to_h(img_render, max_h)
+        img_sil    = _pad_to_h(img_sil,    max_h)
+        img_rgb    = _pad_to_h(img_rgb,    max_h)
+
+        canvas = cv2.hconcat([img_render, img_sil, img_rgb])
+
+        # Header text
+        title = (f"PSNR {gains['psnr']:.2f} | "
+                 f"FIM {gains['fim']:.2f} | "
+                 f"SIL {gains['sil']:.2f} | "
+                 f"SUM {gains['gain']:.2f}")
+        cv2.putText(canvas, title, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (0, 255, 0), 2, cv2.LINE_AA)
+
+        # Show & return
+        cv2.imshow("Current View", canvas)
         cv2.waitKey(1)
 
     def _build_tile(self, img3u8, caption):
