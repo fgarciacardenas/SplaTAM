@@ -57,8 +57,8 @@ VERBOSE = False
 STREAM_VIZ = False
 DUMP_DATA = False
 GRID_VIZ = False    # Show XY occupancy grid
-CURR_VIZ = True     # Show current frame render image
-RENDER_VIZ = True  # Show Silhouette and RGB renders
+CURRENT_VIZ = True     # Show current frame render image
+CANDIDATE_VIZ = True  # Show Silhouette and RGB renders
 
 OCC_SCALE = 30            # px per grid cell (30: every 0.5 m cell becomes 30×30 px)
 PT_COLOR  = (0, 255, 255) # 2D point color (BGR – cyan)
@@ -1349,7 +1349,7 @@ class RosHandler:
         self.k_sum = 5
 
         # Initialize visualization windows
-        if RENDER_VIZ:
+        if CANDIDATE_VIZ:
             cv2.namedWindow("Renders", cv2.WINDOW_NORMAL)
         if GRID_VIZ:
             cv2.namedWindow("Occupancy", cv2.WINDOW_NORMAL)
@@ -1586,12 +1586,12 @@ class RosHandler:
                 self.global_gains[key].append(gains_dict)
 
                 # Visualize renders
-                if RENDER_VIZ:
+                if CANDIDATE_VIZ:
                     sil_arr.append(sil)
                     rgb_arr.append(rgb_render)
 
                 if sil_idx == (len(pose_arr) - 1):
-                    if RENDER_VIZ and rgb_arr and sil_arr:
+                    if CANDIDATE_VIZ and rgb_arr and sil_arr and (sil_idx > 0):
                         self._show_rgb_sil(rgb_arr, sil_arr, pose_arr, gains_arr, mode=2)
                     sil_arr, rgb_arr  = [], []
         
@@ -1667,7 +1667,7 @@ class RosHandler:
             self.plot_images(color, depth)
 
         # Optional: Visualize the Silhouette and RGB render
-        if CURR_VIZ and (self.params is not None):
+        if CURRENT_VIZ and (self.params is not None):
             # Process RGB-D Data
             post_color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
             post_depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
@@ -1833,7 +1833,7 @@ class RosHandler:
 
         # Header text
         title = (f"PSNR {gains['psnr']:.2f} | "
-                 f"FIM {gains['fim']:.2f} | "
+                 f"EIG {gains['eig']:.2f} | "
                  f"SIL {gains['sil']:.2f} | "
                  f"SUM {gains['gain']:.2f}")
         cv2.putText(canvas, title, (10, 30),
