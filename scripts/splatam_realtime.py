@@ -1278,7 +1278,7 @@ def get_renders(params, cam_pose, cam_data):
     """
     with torch.no_grad():
         # Transform Gaussians from world frame to camera frame
-        transformed_gaussians = transform_gaussians(params, torch.linalg.inv(cam_pose), requires_grad = False)
+        transformed_gaussians = transform_gaussians(params, cam_pose, requires_grad = False)
 
         # Initialize Render Variables
         rendervar = transformed_params2rendervar(params, transformed_gaussians)
@@ -1582,7 +1582,7 @@ class RosHandler:
                                                    orthogonal_rotations=False)
 
                 # Generate renders
-                sil, rgb_render = get_renders(self.params, pose_vec, cam_data)
+                sil, rgb_render = get_renders(self.params, torch.linalg.inv(pose_vec), cam_data)
                 
                 # Compute Silhouette gains
                 g_sil = float((sil < 0.5).sum().item())
@@ -1593,7 +1593,7 @@ class RosHandler:
                 # Compute Fisher Information gains
                 if self.k_fisher != 0:
                     with torch.enable_grad():
-                        g_fisher, eig, loc = self.compute_eig(pose_vec, cam_data)
+                        g_fisher, eig, loc = self.compute_eig(torch.linalg.inv(pose_vec), cam_data)
                 else:
                     g_fisher, eig, loc = 0, 0, 0
                 
@@ -1716,7 +1716,7 @@ class RosHandler:
             
             # Generate Silhouette and RGB renders (before mapping)
             cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
-            sil, rgb_render = get_renders(self.params, trans_pose, cam_data)
+            sil, rgb_render = get_renders(self.params, torch.linalg.inv(trans_pose), cam_data)
             
             # Mask invalid depth in GT
             valid_depth_mask = (post_depth > 0)
@@ -1735,7 +1735,7 @@ class RosHandler:
             # Compute Fisher Information gains
             if self.k_fisher != 0:
                 with torch.enable_grad():
-                    g_fisher, eig, loc = self.compute_eig(trans_pose, cam_data)
+                    g_fisher, eig, loc = self.compute_eig(torch.linalg.inv(trans_pose), cam_data)
             else:
                 g_fisher, eig, loc = 0, 0, 0
             
