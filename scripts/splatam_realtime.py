@@ -1415,7 +1415,7 @@ class RosHandler:
                          self._trigger_cb, queue_size=1)
         rospy.Subscriber('/ifpp/finished_signal', Bool,
                          self._finished_cb, queue_size=1)
-        rospy.Subscriber('stop_planning_and_GSplat', Bool,
+        rospy.Subscriber('/ifpp/stop_gs', Bool,
                          self._terminate_cb, queue_size=1)
         rospy.Subscriber('/ifpp/gs_poses', PoseArray,
                          self._gs_poses_cb, queue_size=1)
