@@ -56,9 +56,9 @@ import collections
 VERBOSE = False
 STREAM_VIZ = False
 DUMP_DATA = False
-GRID_VIZ = False    # Show XY occupancy grid
+GRID_VIZ = False       # Show XY occupancy grid
 CURRENT_VIZ = True     # Show current frame render image
-CANDIDATE_VIZ = True  # Show Silhouette and RGB renders
+CANDIDATE_VIZ = False  # Show Silhouette and RGB renders
 
 OCC_SCALE = 30            # px per grid cell (30: every 0.5 m cell becomes 30×30 px)
 PT_COLOR  = (0, 255, 255) # 2D point color (BGR – cyan)
@@ -1523,7 +1523,9 @@ class RosHandler:
 
         # Refresh occupancy grid once per call
         if GRID_VIZ:
-            self._update_occupancy_window(z_slice=0.1, z_tol=0.15, cell=0.002, min_points=100)
+            print("Updating occupancy grid...")
+            self._update_occupancy_window(z_slice=1, z_tol=0.15, cell=0.2, min_points=10)
+            print("Occupancy grid updated.")
 
         # Now process each collected pose
         pose_arr = self.gs_poses.popleft()
