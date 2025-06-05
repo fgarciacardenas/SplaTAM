@@ -163,13 +163,4 @@
 	 return true;
  }
  
- #define CHECK_CUDA(A, debug) \
- A; if(debug) { \
- auto ret = cudaDeviceSynchronize(); \
- if (ret != cudaSuccess) { \
- std::cerr << "\n[CUDA ERROR] in " << __FILE__ << "\nLine " << __LINE__ << ": " << cudaGetErrorString(ret); \
- throw std::runtime_error(cudaGetErrorString(ret)); \
- } \
- }
- 
  #endif

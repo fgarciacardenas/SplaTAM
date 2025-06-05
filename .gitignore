@@ -3,6 +3,7 @@ configs/local
 experiments/
 results/
 wandb/
+data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

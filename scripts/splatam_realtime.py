@@ -36,7 +36,7 @@ from utils.slam_helpers import (
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify, calc_psnr
 
-from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+from hessian_diff_gaussian_rasterization_w_depth import GaussianRasterizer as Renderer
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.slam_helpers import quat_mult
 
@@ -1002,8 +1002,13 @@ def rgbd_slam(config: dict):
         # Clean data
         torch.cuda.empty_cache()
 
+        # Compute Hessian for training poses
+        # TODO
+        ros_handler.compute_H_visited_inv()
+        
         # Collect new data
         ros_handler.map_ready = True
+    
 
     if DUMP_DATA:
         dump_realtime_dataset(dataset, '/home/dev/frame_rt')
@@ -1387,6 +1392,7 @@ class RosHandler:
         self.k_fisher = 1
         self.k_sil = 300
         self.k_sum = 5
+        self.H_train_inv = None
 
         # Initialize visualization windows
         if CANDIDATE_VIZ:
@@ -1410,6 +1416,9 @@ class RosHandler:
         self.gs_poses = collections.deque(maxlen=max_queue_size)
         self.global_gains = {}
         self.gain_psnr_arr = []
+
+        # Store visited poses
+        self.visited_poses = []
 
         # Queues for synchronization
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
@@ -1591,12 +1600,14 @@ class RosHandler:
                 g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
 
                 # Compute Fisher Information gains
-                if self.k_fisher != 0:
-                    with torch.enable_grad():
-                        g_fisher, eig, loc = self.compute_eig(torch.linalg.inv(pose_vec), cam_data)
-                else:
-                    g_fisher, eig, loc = 0, 0, 0
-                
+                # if self.k_fisher != 0:
+                #     with torch.enable_grad():
+                #         g_fisher, eig, loc = self.compute_eig(torch.linalg.inv(pose_vec), cam_data)
+                # else:
+                g_fisher, eig, loc = 0, 0, 0
+                eig = self.compute_eig_score(pose_vec)
+                #for now fish only EIG
+                g_fisher = eig
                 # Scale gains
                 g_sil *= self.k_sil
                 g_fisher *= self.k_fisher
@@ -1763,6 +1774,9 @@ class RosHandler:
 
         if self.first_dataframe is None:
             self.first_dataframe = (color, depth, intrinsics, trans_pose)
+
+        # Append visited pose
+        self.visited_poses.append(trans_pose.cuda())
 
         return color, depth, intrinsics, trans_pose
 
@@ -2100,6 +2114,94 @@ class RosHandler:
         eig_gain = 2.0
         score = eig_scene - eig_gain * loc_cost
         return -score.item(), eig_scene.item(), loc_cost.item()
+
+    def compute_H_visited_inv(self):
+        H_train = None
+        for pose in self.visited_poses:
+            cur_H = self.compute_Hessian( torch.linalg.inv(pose), return_points=True)
+            if H_train is None:
+                H_train = torch.zeros(*cur_H.shape, device=cur_H.device, dtype=cur_H.dtype)
+            H_train += cur_H
+        
+        self.H_train_inv = torch.reciprocal(H_train + 0.1)
+
+
+    def compute_eig_score(self, pose):
+        """ Compute pose scores for the poses """
+
+        cur_H = self.compute_Hessian( torch.linalg.inv(pose), return_points=True)
+        print("cur_H shape: ", cur_H.shape)
+
+        view_score = torch.sum(cur_H * self.H_train_inv).item() 
+        print("EIG: ", view_score)
+
+        return view_score
+
+    @torch.enable_grad()
+    def compute_Hessian(self, rel_w2c, return_points = False, 
+                        return_pose = False):
+        """
+            Compute uncertainty at candidate pose
+                params: Gaussian slam params
+                candidate_trans: (3, )
+                candidate_rot: (4, )
+                return_points:
+                    if True, then the Hessian matrix is returned in shape (N, C), 
+                    else, it is flatten in 1-D.
+
+        """
+        if isinstance(rel_w2c, np.ndarray):
+            rel_w2c = torch.from_numpy(rel_w2c).cuda()
+        rel_w2c = rel_w2c.float()
+
+        # transform to candidate frame
+        with torch.no_grad():
+            pts = self.params['means3D']
+            pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+            pts4 = torch.cat((pts, pts_ones), dim=1)
+
+            transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
+            rgb_colors = self.params['rgb_colors']
+            rotations = F.normalize(self.params['unnorm_rotations'])
+            opacities = torch.sigmoid(self.params['logit_opacities'])
+            scales = torch.exp(self.params['log_scales'])
+            if scales.shape[-1] == 1: # isotropic
+                scales = torch.tile(scales, (1, 3))
+
+        num_points = transformed_pts.shape[0]
+
+        rendervar = {
+            'means3D': transformed_pts.requires_grad_(True),
+            'colors_precomp': rgb_colors.requires_grad_(True),
+            'rotations': rotations.requires_grad_(True),
+            'opacities': opacities.requires_grad_(True),
+            'scales': scales.requires_grad_(True),
+            'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
+        }
+
+        # for means3D, rotation won't change sum of square since R^T R = I
+        rendervar['means2D'].retain_grad()
+        im, _, _, = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
+        im.backward(gradient=torch.ones_like(im) * 1e-3)
+
+        if return_points:
+            cur_H = torch.cat([transformed_pts.grad.detach().reshape(num_points, -1),  
+                                opacities.grad.detach().reshape(num_points, -1)], dim=1)
+
+        else:
+            cur_H = torch.cat([transformed_pts.grad.detach().reshape(-1), 
+                                opacities.grad.detach().reshape(-1)])
+            
+        # set grad to zero
+        for k, v in rendervar.items():
+            v.grad.fill_(0.)
+
+        if not return_pose:
+            return cur_H
+        else:
+            return cur_H, torch.eye(6).cuda()
+
+
 
 
 def dump_realtime_dataset(dataset, out_dir):
