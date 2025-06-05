@@ -1406,7 +1406,7 @@ class RosHandler:
                          self._trigger_cb, queue_size=1)
         rospy.Subscriber('/ifpp/finished_signal', Bool,
                          self._finished_cb, queue_size=1)
-        rospy.Subscriber('stop_planning_and_GSplat', Bool,
+        rospy.Subscriber('/ifpp/stop_gs', Bool,
                          self._terminate_cb, queue_size=1)
         rospy.Subscriber('/ifpp/gs_poses', PoseArray,
                          self._gs_poses_cb, queue_size=1)
@@ -1521,8 +1521,8 @@ class RosHandler:
         with torch.no_grad():
             for sil_idx, vec in enumerate(pose_arr):
                 # Define gain factors
-                k_fisher = 1
-                k_sil = 300
+                k_fisher = 1 #1 - 3 alone
+                k_sil = 500  #300
                 
                 # Compute relative poses
                 pose_mat = self.pose_matrix_from_quaternion(vec)
@@ -1546,7 +1546,7 @@ class RosHandler:
                 g_fisher *= k_fisher
 
                 # Compute mixed gains
-                g = (g_fisher + g_sil) * 5
+                g = (g_fisher + g_sil) * 3
                 gains.append(g)
 
                 # Gains dictionary
