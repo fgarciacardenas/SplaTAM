@@ -34,7 +34,7 @@ from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion
 )
-from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
+from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify, calc_psnr
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from datasets.gradslam_datasets.geometryutils import relative_transformation
@@ -56,9 +56,9 @@ import collections
 VERBOSE = False
 STREAM_VIZ = False
 DUMP_DATA = False
-SIL_VIZ  = True   # Show Silhouette image
-RGB_VIZ  = True   # Show RGB render image
-GRID_VIZ = False  # Show XY occupancy grid
+GRID_VIZ = False       # Show XY occupancy grid
+CURRENT_VIZ = True     # Show current frame render image
+CANDIDATE_VIZ = False  # Show Silhouette and RGB renders
 
 OCC_SCALE = 30            # px per grid cell (30: every 0.5 m cell becomes 30×30 px)
 PT_COLOR  = (0, 255, 255) # 2D point color (BGR – cyan)
@@ -1077,6 +1077,13 @@ def rgbd_slam(config: dict):
     # Plot poses and corresponding gains
     plot_pose_gains(ros_handler.global_gains, save_dir=output_dir + '/poses')
 
+    # Plot <value> vs PSNR
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="sil", axis_name="SIL", prefix="psnr_sil", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="eig", axis_name="EIG", prefix="psnr_eig", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="loc", axis_name="LOC", prefix="psnr_loc", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="fim", axis_name="FIM", prefix="psnr_fim", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="gain", axis_name="SUM", prefix="psnr_sum", save_dir=output_dir + '/psnr_plots')
+
 
 def _first_dict(item: Any) -> Dict[str, float] | None:
     """Return the first gain-dict inside *item* or None."""
@@ -1175,6 +1182,39 @@ def plot_pose_gains(
         plt.close(fig)
 
 
+def plot_value_psnr(
+    gains_arr: list,
+    value: str = "eig",
+    axis_name: str = "EIG",
+    save_dir: str = "/home/dev/splatam/experiments/",
+    prefix: str = "psnr_eig",
+) -> None:
+    """
+    Plot <value> vs PSNR.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    if not gains_arr:
+        print("plot_<value>_psnr: nothing to plot.")
+        return
+
+    # Extract <value> and PSNR values
+    values = [g[value] for g in gains_arr]
+    psnr_values = [g["psnr"] for g in gains_arr]
+
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.scatter(psnr_values, values, alpha=0.8)
+    ax.set_xlabel("PSNR")
+    ax.set_ylabel(f"{axis_name}")
+    ax.set_title(f"{axis_name} vs PSNR")
+
+    # Save the figure
+    fname = os.path.join(save_dir, f"{prefix}_{time.time_ns()}.png")
+    fig.savefig(fname, dpi=300)
+    plt.close(fig)
+
+
 def transform_gaussians(params: dict, cam_pose: torch.Tensor,
                         requires_grad: bool = False) -> dict:
     """
@@ -1222,7 +1262,7 @@ def transform_gaussians(params: dict, cam_pose: torch.Tensor,
     return transformed_gaussians
     
 
-def get_silhouette(params, cam_pose, cam_data, _render = False):
+def get_renders(params, cam_pose, cam_data):
     """
     Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
     
@@ -1238,14 +1278,11 @@ def get_silhouette(params, cam_pose, cam_data, _render = False):
     """
     with torch.no_grad():
         # Transform Gaussians from world frame to camera frame
-        transformed_gaussians = transform_gaussians(params, cam_pose, requires_grad = False)
+        transformed_gaussians = transform_gaussians(params, torch.linalg.inv(cam_pose), requires_grad = False)
 
         # Initialize Render Variables
-        if _render:
-            rendervar = transformed_params2rendervar(params, transformed_gaussians)
-            rgb_render, _, _, = Renderer(raster_settings=cam_data['cam'])(**rendervar)
-        else:
-            rgb_render = None
+        rendervar = transformed_params2rendervar(params, transformed_gaussians)
+        rgb_render, _, _, = Renderer(raster_settings=cam_data['cam'])(**rendervar)
         
         # Get depth render
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, cam_data['w2c'],
@@ -1337,41 +1374,42 @@ class RosHandler:
         # Parameters
         self.max_dt = max_dt
         self.max_queue_size = max_queue_size
-        self.pose_scale = 10.0
 
         # Camera objects
         self.cam     = None
         self.w2c_ref = None
         self.params  = None
 
-        # Initialize visualization window
-        if SIL_VIZ:
-            cv2.namedWindow("Silhouettes", cv2.WINDOW_NORMAL)
-        if RGB_VIZ:
+        # Rotate camera_frame to camera_optical_frame
+        self.r_cam_to_opt = Rotation.from_quat([-0.5, 0.5, -0.5, 0.5])
+
+        # Define gain factors
+        self.k_fisher = 1
+        self.k_sil = 300
+        self.k_sum = 5
+
+        # Initialize visualization windows
+        if CANDIDATE_VIZ:
             cv2.namedWindow("Renders", cv2.WINDOW_NORMAL)
         if GRID_VIZ:
             cv2.namedWindow("Occupancy", cv2.WINDOW_NORMAL)
             self.last_grid_img = None
 
-        # Grid geometry (shared)
+        # Render canvas
         self._cols   = 4
         self._rows   = 2
         self._cell_w = 480
         self._cell_h = 640
         self._text_h = 32
         self._pad = 12
-
-        # separate state for each window
-        self._sil_canvas = _make_canvas(self._cols, self._rows,
-                                        self._cell_w, self._cell_h,
-                                        self._text_h, self._pad)
-        self._rgb_canvas = _make_canvas(self._cols, self._rows,
+        self._viz_canvas = _make_canvas(self._cols, self._rows,
                                         self._cell_w, self._cell_h,
                                         self._text_h, self._pad)
 
         # Pose gain request
         self.gs_poses = collections.deque(maxlen=max_queue_size)
         self.global_gains = {}
+        self.gain_psnr_arr = []
 
         # Queues for synchronization
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
@@ -1445,11 +1483,19 @@ class RosHandler:
 
     def _pose_cb(self, msg: Odometry):
         if not self.map_ready: return
-        ts = self._ts_ns(msg.header)
+        ts  = self._ts_ns(msg.header)
         pos = msg.pose.pose.position
         ori = msg.pose.pose.orientation
-        arr = [pos.x/self.pose_scale, pos.y/self.pose_scale, pos.z/self.pose_scale,
-               ori.x, ori.y, ori.z, ori.w]
+
+        # Compute orientation rotated into optical frame
+        q_cam = np.array([ori.x, ori.y, ori.z, ori.w])
+        r_cam = Rotation.from_quat(q_cam)
+        r_opt = r_cam * self.r_cam_to_opt
+        q_opt = r_opt.as_quat()
+
+        # Generate pose array
+        arr = np.array([pos.x, pos.y, pos.z, *q_opt], dtype=np.float32)
+
         self.pose_queue.append({'ts': ts, 'arr': arr})
 
     def _trigger_cb(self, msg: Bool):
@@ -1470,11 +1516,18 @@ class RosHandler:
             rospy.loginfo(f"Received {len(msg.poses)} GS poses")
         pose_arr = []
         for pose_msg in msg.poses:
-            pose = np.array([pose_msg.position.x/self.pose_scale, 
-                             pose_msg.position.y/self.pose_scale, 
-                             pose_msg.position.z/self.pose_scale,
-                             pose_msg.orientation.x, pose_msg.orientation.y,
-                             pose_msg.orientation.z, pose_msg.orientation.w], dtype=np.float32)
+            # Compute orientation rotated into optical frame
+            q_cam = np.array([pose_msg.orientation.x, pose_msg.orientation.y,
+                              pose_msg.orientation.z, pose_msg.orientation.w])
+            r_cam = Rotation.from_quat(q_cam)
+            r_opt = r_cam * self.r_cam_to_opt
+            q_opt = r_opt.as_quat()
+
+            # Generate pose array
+            pose = np.array([pose_msg.position.x, 
+                             pose_msg.position.y, 
+                             pose_msg.position.z, 
+                             *q_opt], dtype=np.float32)
             pose_arr.append(pose)
         pose_arr = np.array(pose_arr)
         self.gs_poses.append(pose_arr)
@@ -1510,7 +1563,9 @@ class RosHandler:
 
         # Refresh occupancy grid once per call
         if GRID_VIZ:
-            self._update_occupancy_window(z_slice=0.1, z_tol=0.15, cell=0.002, min_points=100)
+            print("Updating occupancy grid...")
+            self._update_occupancy_window(z_slice=1, z_tol=0.15, cell=0.2, min_points=10)
+            print("Occupancy grid updated.")
 
         # Now process each collected pose
         pose_arr = self.gs_poses.popleft()
@@ -1520,33 +1575,34 @@ class RosHandler:
 
         with torch.no_grad():
             for sil_idx, vec in enumerate(pose_arr):
-                # Define gain factors
-                k_fisher = 1 #1 - 3 alone
-                k_sil = 500  #300
-                
                 # Compute relative poses
                 pose_mat = self.pose_matrix_from_quaternion(vec)
                 pose_mat = torch.from_numpy(pose_mat).float().cuda()
                 pose_vec = relative_transformation(self.initial_pose, pose_mat,
                                                    orthogonal_rotations=False)
 
+                # Generate renders
+                sil, rgb_render = get_renders(self.params, pose_vec, cam_data)
+                
                 # Compute Silhouette gains
-                sil, rgb_render = get_silhouette(self.params, pose_vec, cam_data, _render=RGB_VIZ)
                 g_sil = float((sil < 0.5).sum().item())
 
                 # Normalize Silhouette gains by number of pixels
                 g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
 
                 # Compute Fisher Information gains
-                with torch.enable_grad():
-                    g_fisher, eig, loc = self.compute_eig(pose_vec, cam_data)
+                if self.k_fisher != 0:
+                    with torch.enable_grad():
+                        g_fisher, eig, loc = self.compute_eig(pose_vec, cam_data)
+                else:
+                    g_fisher, eig, loc = 0, 0, 0
                 
                 # Scale gains
-                g_sil *= k_sil
-                g_fisher *= k_fisher
+                g_sil *= self.k_sil
+                g_fisher *= self.k_fisher
 
                 # Compute mixed gains
-                g = (g_fisher + g_sil) * 3
+                g = self.k_sum * (g_fisher + g_sil)
                 gains.append(g)
 
                 # Gains dictionary
@@ -1572,16 +1628,13 @@ class RosHandler:
                 self.global_gains[key].append(gains_dict)
 
                 # Visualize renders
-                if SIL_VIZ:
+                if CANDIDATE_VIZ:
                     sil_arr.append(sil)
-                if RGB_VIZ:
                     rgb_arr.append(rgb_render)
 
                 if sil_idx == (len(pose_arr) - 1):
-                    if SIL_VIZ:
-                        self._show_silhouette(sil_arr, pose_arr, gains_arr)
-                    if RGB_VIZ and (rgb_arr[0] is not None):
-                        self._show_render(rgb_arr, pose_arr, gains_arr, mode=2)
+                    if CANDIDATE_VIZ and rgb_arr and sil_arr and (sil_idx > 0):
+                        self._show_rgb_sil(rgb_arr, sil_arr, pose_arr, gains_arr, mode=2)
                     sil_arr, rgb_arr  = [], []
         
         # Publish gains
@@ -1638,7 +1691,7 @@ class RosHandler:
         # Remove values large than max depth
         # print("Depth min pre: ", depth.min().item())
         # print("Depth max pre: ", depth.max().item())
-        depth[depth >= 0.95] = -1
+        depth[depth >= 9.5] = -1
         # print("Depth min post: ", depth.min().item())
         # print("Depth max post: ", depth.max().item())
 
@@ -1655,6 +1708,59 @@ class RosHandler:
         if STREAM_VIZ:
             self.plot_images(color, depth)
 
+        # Optional: Visualize the Silhouette and RGB render
+        if CURRENT_VIZ and (self.params is not None):
+            # Process RGB-D Data
+            post_color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+            post_depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+            
+            # Generate Silhouette and RGB renders (before mapping)
+            cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+            sil, rgb_render = get_renders(self.params, trans_pose, cam_data)
+            
+            # Mask invalid depth in GT
+            valid_depth_mask = (post_depth > 0)
+
+            # Compute PSNR
+            weighted_im = rgb_render * valid_depth_mask
+            weighted_gt_im = post_color * valid_depth_mask
+            psnr = calc_psnr(weighted_im, weighted_gt_im).mean().cpu().numpy()
+
+            # Compute Silhouette gains
+            g_sil = float((sil < 0.5).sum().item())
+
+            # Normalize Silhouette gains by number of pixels
+            g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
+
+            # Compute Fisher Information gains
+            if self.k_fisher != 0:
+                with torch.enable_grad():
+                    g_fisher, eig, loc = self.compute_eig(trans_pose, cam_data)
+            else:
+                g_fisher, eig, loc = 0, 0, 0
+            
+            # Scale gains
+            g_sil *= self.k_sil
+            g_fisher *= self.k_fisher
+
+            # Compute mixed gains
+            g = 5 * (g_fisher + g_sil)
+            
+            # Store poses with corresponding gains and psnr
+            gains_dict = {
+                'pose': pose,
+                'sil': g_sil,
+                'eig': eig,
+                'loc': loc,
+                'fim': g_fisher,
+                'gain': g,
+                'psnr': psnr
+            }
+            self.gain_psnr_arr.append(gains_dict)
+
+            # Plot previous renders and new view
+            self.plot_renders(rgb_render, sil, color, gains_dict)
+
         if self.first_dataframe is None:
             self.first_dataframe = (color, depth, intrinsics, trans_pose)
 
@@ -1667,8 +1773,7 @@ class RosHandler:
         for _ in range(k+1): self.pose_queue.popleft()
 
     def pose_matrix_from_quaternion(self, arr):
-        cam2opt = Rotation.from_euler('ZYX', [-np.pi/2,0,-np.pi/2])
-        rot = Rotation.from_quat(arr[3:]) * cam2opt
+        rot = Rotation.from_quat(arr[3:])
         mat = np.eye(4)
         mat[:3,:3] = rot.as_matrix()
         mat[:3,3]  = arr[:3]
@@ -1716,6 +1821,71 @@ class RosHandler:
         
         cv2.waitKey(1)
 
+    def plot_renders(self, rgb_render, sil_render, rgb_img, gains):
+        """
+        Visualise (render RGB, silhouette mask, ground-truth RGB) side-by-side.
+        """
+        # Helper: Tensor/np-array → BGR uint8
+        def _to_bgr_u8(t):
+            """Handle (C,H,W) or (H,W) tensors / numpy; output BGR uint8."""
+            if torch.is_tensor(t):
+                arr = t.detach().cpu()
+                if arr.ndim == 3:              # (C,H,W) or (H,W,C)
+                    if arr.shape[0] in (3, 4): # channel-first
+                        arr = arr.permute(1, 2, 0)
+                    arr = arr.numpy()
+                else:                          # (H,W)
+                    arr = arr.numpy()
+            else:
+                arr = t                         # already numpy
+
+            if arr.ndim == 2:                   # grayscale → 3-ch
+                arr = (arr < 0.5).astype(np.uint8) * 255
+                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+            else:
+                # float 0-1 or 0-255?  make sure we end in 0-255 uint8
+                if arr.dtype != np.uint8:
+                    maxv = arr.max()
+                    if maxv <= 1.0:
+                        arr = (arr * 255)
+                    arr = arr.clip(0, 255).astype(np.uint8)
+                # RGB → BGR for OpenCV
+                if arr.shape[2] == 3:
+                    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            return arr
+
+        img_render = _to_bgr_u8(rgb_render)
+        img_sil    = _to_bgr_u8(sil_render)
+        img_rgb    = _to_bgr_u8(rgb_img)
+
+        # Normalise heights, concatenate horizontally
+        max_h = max(img_render.shape[0], img_sil.shape[0], img_rgb.shape[0])
+
+        def _pad_to_h(img, H):
+            if img.shape[0] == H:
+                return img
+            pad = np.zeros((H - img.shape[0], img.shape[1], 3), np.uint8)
+            return np.vstack([img, pad])
+
+        img_render = _pad_to_h(img_render, max_h)
+        img_sil    = _pad_to_h(img_sil,    max_h)
+        img_rgb    = _pad_to_h(img_rgb,    max_h)
+
+        canvas = cv2.hconcat([img_render, img_sil, img_rgb])
+
+        # Header text
+        title = (f"PSNR {gains['psnr']:.2f} | "
+                 f"EIG {gains['eig']:.2f} | "
+                 f"SIL {gains['sil']:.2f} | "
+                 f"SUM {gains['gain']:.2f}")
+        cv2.putText(canvas, title, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (0, 255, 0), 2, cv2.LINE_AA)
+
+        # Show & return
+        cv2.imshow("Current View", canvas)
+        cv2.waitKey(1)
+
     def _build_tile(self, img3u8, caption):
         """Return <tile_h+text_h, cell_w, 3> ready to blit."""
         # Resize image for canvas
@@ -1741,58 +1911,46 @@ class RosHandler:
             x0:x0 + self._cell_w] = tile
         return next_idx + 1
 
-    def _show_silhouette(self, sil_tensor, pose_arr, gains, mode=1):
-        # Loop through all poses in pose_arr and add their silhouette images to the grid
-        for idx, pose_vec in enumerate(pose_arr):
-            mask = (sil_tensor[idx] < .5).cpu().numpy().astype(np.uint8) * 255
-            mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    def _show_rgb_sil(self, rgb_tensor, sil_tensor, pose_arr, gains, mode=1):
+        """
+        Draw RGB and SIL images inter-leaved on the shared 4x2 canvas.
+        """
+        canvas = self._viz_canvas
+        canvas[:] = 0
 
-            # Prepare the caption for the pose
-            x, y, z = pose_vec[:3]
-            yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
-                                          1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
-            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains[idx]['gain']:.1f}"
-
-            # Choose which gains to display in the caption
-            if mode == 1:
-                cap += f" | FIM: {gains[idx]['fim']:.1f} | SIL: {gains[idx]['sil']:.1f}"
-            else:
-                cap += f" | EIG: {gains[idx]['eig']:.1f} | LOC: {gains[idx]['loc']:.1f}"
-
-            # Add the image to the canvas in the correct position
-            tile = self._build_tile(mask, cap)
-            self._blit_tile(self._sil_canvas, idx, tile)
-        
-        # Show the complete canvas with all the silhouettes
-        cv2.imshow("Silhouettes", self._sil_canvas)
-        cv2.waitKey(1)
-
-
-    def _show_render(self, rgb_tensor, pose_arr, gains, mode=1):
-        # Loop through all poses in pose_arr and add their RGB renders to the grid
-        for idx, pose_vec in enumerate(pose_arr):
-            rgb = (rgb_tensor[idx].clamp(0,1).permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
+        next_idx = 0
+        for i, pose_vec in enumerate(pose_arr):
+            # RGB tile
+            rgb = (rgb_tensor[i].clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
             rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
-            # Prepare the caption for the pose
-            x, y, z = pose_vec[:3]
-            yaw = math.degrees(math.atan2(2*(pose_vec[6]*pose_vec[5] + pose_vec[3]*pose_vec[4]),
-                                          1 - 2*(pose_vec[4]**2 + pose_vec[5]**2)))
-            cap = f"Pos: {x:.2f}, {y:.2f}, {z:.2f}, {yaw:+.0f} | G: {gains[idx]['gain']:.1f}"
-
-            # Choose which gains to display in the caption
-            if mode == 1:
-                cap += f" | FIM: {gains[idx]['fim']:.1f} | SIL: {gains[idx]['sil']:.1f}"
-            else:
-                cap += f" | EIG: {gains[idx]['eig']:.1f} | LOC: {gains[idx]['loc']:.1f}"
-
-            # Add the image to the canvas in the correct position
+            cap = self._make_caption(pose_vec, gains[i], mode)
             tile = self._build_tile(rgb, cap)
-            self._blit_tile(self._rgb_canvas, idx, tile)
+            next_idx = self._blit_tile(canvas, next_idx, tile)
 
-        # Show the complete canvas with all the RGB renders
-        cv2.imshow("Renders", self._rgb_canvas)
+            # SIL tile
+            sil = (sil_tensor[i] < .5).cpu().numpy().astype(np.uint8) * 255
+            sil = cv2.cvtColor(sil, cv2.COLOR_GRAY2BGR)
+
+            tile = self._build_tile(sil, cap)
+            next_idx = self._blit_tile(canvas, next_idx, tile)
+
+        cv2.imshow("Renders", canvas)
         cv2.waitKey(1)
+
+    def _make_caption(self, pose_vec, gains, mode):
+        """Return a short text for the bottom strip."""
+        x, y, z = pose_vec[:3]
+        yaw = math.degrees(math.atan2(
+            2 * (pose_vec[6] * pose_vec[5] + pose_vec[3] * pose_vec[4]),
+            1 - 2 * (pose_vec[4] ** 2 + pose_vec[5] ** 2)
+        ))
+        cap = f"<{x:.2f},{y:.2f},{z:.2f},{yaw:+.0f} deg> G:{gains['gain']:.1f}"
+        if mode == 1:
+            cap += f", FIM:{gains['fim']:.1f}, SIL:{gains['sil']:.1f}"
+        else:
+            cap += f", EIG:{gains['eig']:.1f}, SIL:{gains['sil']:.1f}"
+        return cap
 
     def _update_occupancy_window(self, z_slice=0.0, z_tol=0.15,
                                  cell=0.20, min_points=5):
