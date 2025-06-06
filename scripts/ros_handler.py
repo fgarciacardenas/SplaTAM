@@ -55,8 +55,7 @@ class RosHandler:
         self.k_eig = ros_handler_config['k_eig']
         self.k_sil = ros_handler_config['k_sil']
         self.k_sum = ros_handler_config['k_sum']
-        self.sat_sil = ros_handler_config['sat_sil']
-        self.sat_eig = ros_handler_config['sat_eig']
+        self.nl_sil = ros_handler_config['nl_sil']
 
         # Fisher Information Matrix parameters
         self.H_train_inv = None
@@ -68,8 +67,7 @@ class RosHandler:
         print(f"  k_eig: {self.k_eig}")
         print(f"  k_sil: {self.k_sil}")
         print(f"  k_sum: {self.k_sum}")
-        print(f"  sat_sil: {self.sat_sil}")
-        print(f"  sat_eig: {self.sat_eig}")
+        print(f"  nl_sil: {self.nl_sil}")
         print(f"  monte_carlo: {self.monte_carlo}")
         print(f"  N_monte_carlo: {self.N_monte_carlo}")
         
@@ -304,11 +302,9 @@ class RosHandler:
                 g_sil *= self.k_sil
                 g_eig *= self.k_eig
 
-                # Saturate gains if enabled
-                if self.sat_sil is not None:
-                    g_sil = min(g_sil, self.sat_sil)
-                if self.sat_eig is not None:
-                    g_eig = min(g_eig, self.sat_eig)
+                # Apply non-linear scaling to silhouette gains
+                if self.nl_sil:
+                    g_sil = (3400 / (1 + math.exp(-0.002*g_sil))) - 1700
 
                 # Compute mixed gains
                 g_sum = self.k_sum * (g_eig + g_sil)
@@ -452,11 +448,9 @@ class RosHandler:
             g_sil *= self.k_sil
             g_eig *= self.k_eig
 
-            # Saturate gains if enabled
-            if self.sat_sil is not None:
-                g_sil = min(g_sil, self.sat_sil)
-            if self.sat_eig is not None:
-                g_eig = min(g_eig, self.sat_eig)
+            # Apply non-linear scaling to silhouette gains
+            if self.nl_sil:
+                g_sil = (3400 / (1 + math.exp(-0.002*g_sil))) - 1700
 
             # Compute mixed gains
             g_sum = 5 * (g_eig + g_sil)
