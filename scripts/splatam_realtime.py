@@ -1085,7 +1085,7 @@ if __name__ == "__main__":
     parser.add_argument("--k_sum", type=float, help="Scaling factor for combined gain", default=1.0)
     parser.add_argument("--sat_sil", type=float, help="Saturation threshold for silhouette gain (default: disabled)", default=None)
     parser.add_argument("--sat_eig", type=float, help="Saturation threshold for fisher gain (default: disabled)", default=None)
-    parser.add_argument("--use_monte", type=bool, help="Flag to enable Monte Carlo approximation", default=True)
+    parser.add_argument("--disable_monte", action='store_true', help="Flag to disable Monte Carlo approximation")
     parser.add_argument("--n_monte", type=int, help="Number of iterations for Monte Carlo approximation", default=40)
     parser.add_argument("--run_name", type=str, help="Overrides the experiment's run name", default=None)
     parser.add_argument("--map_iter", type=int, help="Overrides the experiment's mapping iterations", default=None)
@@ -1098,7 +1098,7 @@ if __name__ == "__main__":
         'k_sum': args.k_sum,
         'sat_sil': args.sat_sil,
         'sat_eig': args.sat_eig,
-        'use_monte': args.use_monte,
+        'use_monte': False if args.disable_monte else True,
         'n_monte': args.n_monte
     }
 
