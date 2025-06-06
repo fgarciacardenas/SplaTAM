@@ -1,7 +1,7 @@
 import os
 from os.path import join as p_join
 
-scenes = ["seq3"]
+scenes = ["room01"]
 
 primary_device="cuda:0"
 seed = int(0)
@@ -11,7 +11,7 @@ map_every = 1
 keyframe_every = 5
 mapping_window_size = 32
 tracking_iters = 10
-mapping_iters = 15
+mapping_iters = 30
 
 group_name = "habitat"
 run_name = f"{scene_name}_{seed}"
