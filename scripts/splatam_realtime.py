@@ -1005,7 +1005,7 @@ def rgbd_slam(config: dict):
         # Compute Hessian for training poses
         # TODO
         ros_handler.compute_H_visited_inv()
-        
+
         # Collect new data
         ros_handler.map_ready = True
     
@@ -1600,14 +1600,16 @@ class RosHandler:
                 g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
 
                 # Compute Fisher Information gains
-                # if self.k_fisher != 0:
-                #     with torch.enable_grad():
-                #         g_fisher, eig, loc = self.compute_eig(torch.linalg.inv(pose_vec), cam_data)
-                # else:
-                g_fisher, eig, loc = 0, 0, 0
-                eig = self.compute_eig_score(pose_vec)
+
                 #for now fish only EIG
-                g_fisher = eig
+                if self.k_fisher != 0:
+                    #gradient already enabled in compute hessian def
+                    eig= self.compute_eig_score(pose_vec)
+                    g_fisher = eig
+                    loc = 0 
+                else:
+                    g_fisher, eig, loc = 0, 0, 0
+
                 # Scale gains
                 g_sil *= self.k_sil
                 g_fisher *= self.k_fisher
@@ -1745,8 +1747,9 @@ class RosHandler:
 
             # Compute Fisher Information gains
             if self.k_fisher != 0:
-                with torch.enable_grad():
-                    g_fisher, eig, loc = self.compute_eig(torch.linalg.inv(trans_pose), cam_data)
+                eig= self.compute_eig_score(trans_pose)
+                g_fisher = eig
+                loc = 0 
             else:
                 g_fisher, eig, loc = 0, 0, 0
             
@@ -2051,69 +2054,7 @@ class RosHandler:
 
         # Exponential-moving-average update
         self._fim_global = (momentum * self._fim_global + (1.0 - momentum) * fim_diag + 1e-9)
-
-    def compute_eig(self, pose_mat: torch.Tensor, cam_data: dict):
-        # Initialize render variables for computing scene (mapping) gradients
-        gaussians_scene = transform_gaussians(self.params, pose_mat, requires_grad=True)
-        rendervar_scene = transformed_params2rendervar(self.params, gaussians_scene)
-        rgb_scene, _, _, = Renderer(raster_settings=cam_data['cam'])(**rendervar_scene)
-
-        # Compute Fisher Information Matrix (diagonalized)
-        # The rendered RGB image rgb_scene is differentiated w.r.t. 
-        # the Gaussian parameters w_list (means3D, logit_opacities)
-        w_list = [self.params['means3D'], self.params['logit_opacities']]
-        grads  = torch.autograd.grad(
-            outputs       = rgb_scene,
-            inputs        = w_list,
-            grad_outputs  = torch.ones_like(rgb_scene),
-            create_graph  = False, retain_graph = False
-        )
-
-        # Shape FIM as 1D vector
-        fim_diag = torch.cat([(g.detach() ** 2).reshape(-1) for g in grads])
-
-        # Update global Fisher Information Matrix
-        # Dividing the current per-parameter Fisher information by the running average 
-        # implements the expected information gain (EIG) for new scene knowledge
-        self.update_global_fim(fim_diag)
-
-        # Compute the EIG of the scene
-        eig_scene = (fim_diag / self._fim_global).sum()
-
-        # Normalize EIG by number of pixels
-        eig_scene /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
-
-        # Initialize render variables for computing pose gradients
-        pose_dyn = pose_mat.clone().detach().requires_grad_(True)
-        gaussians_pose = transform_gaussians(self.params, pose_dyn, requires_grad=False)
-        rendervar_pose = transformed_params2rendervar(self.params, gaussians_pose)
-        rgb_pose, _, _ = Renderer(raster_settings=cam_data['cam'])(**rendervar_pose)
-
-        # Jacobians of camera pose with respect to the mean and covariances of each Gaussian
-        J_pose, = torch.autograd.grad(
-            outputs      = rgb_pose,
-            inputs       = pose_dyn,
-            grad_outputs = torch.ones_like(rgb_pose),
-            retain_graph = False
-        )
-
-        # If the view is uninformative, return zero gain
-        if J_pose.abs().max() == 0:
-            z = torch.tensor(0., device=pose_mat.device).item()
-            return z, eig_scene.item(), z
-
-        # Compute Cramer-Rao lower-bound surrogate for pose variance
-        Jv = J_pose.reshape(-1)
-        JJ = torch.outer(Jv, Jv) # 6x6 Fisher matrix
-        JJ64 = JJ.double()
-        eps  = 1e-3 * torch.eye(JJ.size(0), device=JJ.device, dtype=JJ64.dtype)
-        _, logabsdet = torch.linalg.slogdet(JJ64 + eps)
-        loc_cost = logabsdet.float()
-
-        # Combine gain terms
-        eig_gain = 2.0
-        score = eig_scene - eig_gain * loc_cost
-        return -score.item(), eig_scene.item(), loc_cost.item()
+        
 
     def compute_H_visited_inv(self):
         H_train = None
@@ -2128,7 +2069,7 @@ class RosHandler:
 
     def compute_eig_score(self, pose):
         """ Compute pose scores for the poses """
-
+        # Compute Hessian want w2c
         cur_H = self.compute_Hessian( torch.linalg.inv(pose), return_points=True)
         print("cur_H shape: ", cur_H.shape)
 
