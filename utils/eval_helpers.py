@@ -405,147 +405,9 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
     plt.close()
 
 
-def transform_gaussians(params: dict, cam_pose: torch.Tensor,
-                        requires_grad: bool = False) -> dict:
-    """
-    Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
-    
-    Args:
-        params: dict of parameters
-        cam_pose: camera pose
-        requires_grad: flag whether to keep gradients attached
-    
-    Returns:
-        transformed_gaussians: Gaussians in the camera frame
-    """
-
-    # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
-    if params['log_scales'].shape[1] == 1:
-        transform_rots = False # Isotropic Gaussians
-    else:
-        transform_rots = True # Anisotropic Gaussians
-    
-    # Get Centers and Unnorm Rots of Gaussians in World Frame
-    pts = params['means3D']
-    unnorm_rots = params['unnorm_rotations']
-
-    # Detach or keep gradients
-    if not requires_grad:
-        pts = pts.detach()
-        unnorm_rots = unnorm_rots.detach()
-    
-    # Transform Centers of Gaussians to Camera Frame
-    transformed_gaussians = {}
-    pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
-    pts4 = torch.cat((pts, pts_ones), dim=1)
-    transformed_pts = (cam_pose @ pts4.T).T[:, :3]
-    transformed_gaussians['means3D'] = transformed_pts
-
-    # Transform Rots of Gaussians to Camera Frame
-    if transform_rots:
-        norm_rots = F.normalize(unnorm_rots)
-        transformed_rots = quat_mult(matrix_to_quaternion(cam_pose[:3,:3]), norm_rots)
-        transformed_gaussians['unnorm_rotations'] = transformed_rots
-    else:
-        transformed_gaussians['unnorm_rotations'] = unnorm_rots
-
-    return transformed_gaussians
-
-def update_global_fim(global_fim: torch.Tensor, fim_diag: torch.Tensor, momentum: float = 0.9):
-    """
-    Keep an exponential-moving-average of the per-frame Fisher information
-    diagonal. Resize the stored vector automatically whenever the number
-    of Gaussians changes (after densification / pruning).
-    """
-    # Initial function call
-    if global_fim is None:
-        global_fim = fim_diag.clone().detach() + 1e-9
-        return global_fim
-
-    # Retrieve previous and new sizes
-    old_N = global_fim.numel()
-    new_N = fim_diag.numel()
-
-    # Gaussian were added or pruned
-    if new_N != old_N:
-        if new_N > old_N: # If new Gaussians were added
-            # Keep running stats
-            padded = fim_diag.clone().detach()
-            padded[:old_N] = global_fim
-            global_fim = padded
-        else: # If Gaussians were pruned
-            global_fim = global_fim[:new_N]
-
-    # Exponential-moving-average update
-    global_fim = (momentum * global_fim + (1.0 - momentum) * fim_diag + 1e-9)
-    return global_fim
-
-def compute_eig(params, pose_mat: torch.Tensor, cam_data: dict, global_fim: torch.Tensor):
-    # Initialize render variables for computing scene (mapping) gradients
-    gaussians_scene = transform_gaussians(params, pose_mat, requires_grad=True)
-    rendervar_scene = transformed_params2rendervar(params, gaussians_scene)
-    rgb_scene, _, _, = Renderer(raster_settings=cam_data['cam'])(**rendervar_scene)
-
-    # Compute Fisher Information Matrix (diagonalized)
-    # The rendered RGB image rgb_scene is differentiated w.r.t. 
-    # the Gaussian parameters w_list (means3D, logit_opacities)
-    w_list = [params['means3D'], params['logit_opacities']]
-    grads  = torch.autograd.grad(
-        outputs       = rgb_scene,
-        inputs        = w_list,
-        grad_outputs  = torch.ones_like(rgb_scene),
-        create_graph  = False, retain_graph = False
-    )
-
-    # Shape FIM as 1D vector
-    fim_diag = torch.cat([(g.detach() ** 2).reshape(-1) for g in grads])
-
-    # Update global Fisher Information Matrix
-    # Dividing the current per-parameter Fisher information by the running average 
-    # implements the expected information gain (EIG) for new scene knowledge
-    global_fim = update_global_fim(global_fim, fim_diag)
-
-    # Compute the EIG of the scene
-    eig_scene = (fim_diag / global_fim).sum()
-
-    # Normalize EIG by number of pixels
-    eig_scene /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
-
-    # Initialize render variables for computing pose gradients
-    pose_dyn = pose_mat.clone().detach().requires_grad_(True)
-    gaussians_pose = transform_gaussians(params, pose_dyn, requires_grad=False)
-    rendervar_pose = transformed_params2rendervar(params, gaussians_pose)
-    rgb_pose, _, _ = Renderer(raster_settings=cam_data['cam'])(**rendervar_pose)
-
-    # Jacobians of camera pose with respect to the mean and covariances of each Gaussian
-    J_pose, = torch.autograd.grad(
-        outputs      = rgb_pose,
-        inputs       = pose_dyn,
-        grad_outputs = torch.ones_like(rgb_pose),
-        retain_graph = False
-    )
-
-    # If the view is uninformative, return zero gain
-    if J_pose.abs().max() == 0:
-        z = torch.tensor(0., device=pose_mat.device).item()
-        return z, eig_scene.item(), z, global_fim
-
-    # Compute Cramer-Rao lower-bound surrogate for pose variance
-    Jv = J_pose.reshape(-1)
-    JJ = torch.outer(Jv, Jv) # 6x6 Fisher matrix
-    JJ64 = JJ.double()
-    eps  = 1e-3 * torch.eye(JJ.size(0), device=JJ.device, dtype=JJ64.dtype)
-    _, logabsdet = torch.linalg.slogdet(JJ64 + eps)
-    loc_cost = logabsdet.float()
-
-    # Combine gain terms
-    eig_gain = 2.0
-    score = eig_scene - eig_gain * loc_cost
-    return -score.item(), eig_scene.item(), loc_cost.item(), global_fim
-
-
 def eval(dataset, final_params, num_frames, eval_dir, sil_thres, 
-         mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
+         mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, 
+         eval_every=1, save_frames=False, ros_handler=None):
     print("Evaluating Final Parameters ...")
     psnr_list = []
     rmse_list = []
@@ -626,8 +488,8 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
                                     torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
         
         # Compute Fisher Information gains
-        with torch.enable_grad():
-            g_fisher, eig, loc, global_fim = compute_eig(final_params, pose, curr_data, global_fim)
+        if ros_handler is not None:
+            eig = ros_handler.compute_eig_score(pose)
 
         psnr_list.append(psnr.cpu().numpy())
         ssim_list.append(ssim.cpu().numpy())
@@ -733,12 +595,12 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     avg_ssim = ssim_list.mean()
     avg_lpips = lpips_list.mean()
     avg_eig = eig_list.mean()
-    print("Average PSNR: {:.2f}".format(avg_psnr))
     print("Average Depth RMSE: {:.2f} cm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} cm".format(avg_l1*100))
     print("Average MS-SSIM: {:.3f}".format(avg_ssim))
     print("Average LPIPS: {:.3f}".format(avg_lpips))
-    print("Average EIG: {:.3f}".format(avg_eig))
+    print("Average PSNR (after mapping): {:.2f}".format(avg_psnr))
+    print("Average EIG (after mapping): {:.2f}".format(avg_eig))
 
     if wandb_run is not None:
         wandb_run.log({"Final Stats/Average PSNR": avg_psnr, 
