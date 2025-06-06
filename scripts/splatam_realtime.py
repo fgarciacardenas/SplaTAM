@@ -1084,6 +1084,7 @@ if __name__ == "__main__":
     parser.add_argument("--k_eig", type=float, help="Scaling factor for fisher gain", default=1.0)
     parser.add_argument("--k_sum", type=float, help="Scaling factor for combined gain", default=1.0)
     parser.add_argument("--nl_sil", action='store_true', help="Flag to enable non-linear activation for silhouette gain")
+    parser.add_argument("--nl_eig", action='store_true', help="Flag to enable non-linear activation for fisher gain")
     parser.add_argument("--disable_monte", action='store_true', help="Flag to disable Monte Carlo approximation")
     parser.add_argument("--n_monte", type=int, help="Number of iterations for Monte Carlo approximation", default=40)
     parser.add_argument("--run_name", type=str, help="Overrides the experiment's run name", default=None)
@@ -1096,6 +1097,7 @@ if __name__ == "__main__":
         'k_eig': args.k_eig,
         'k_sum': args.k_sum,
         'nl_sil': args.nl_sil,
+        'nl_eig': args.nl_eig,
         'use_monte': False if args.disable_monte else True,
         'n_monte': args.n_monte
     }
