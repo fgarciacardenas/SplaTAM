@@ -52,9 +52,11 @@ class RosHandler:
         self.r_cam_to_opt = Rotation.from_quat([-0.5, 0.5, -0.5, 0.5])
 
         # Define gain factors
-        self.k_fisher = ros_handler_config['k_eig']
+        self.k_eig = ros_handler_config['k_eig']
         self.k_sil = ros_handler_config['k_sil']
         self.k_sum = ros_handler_config['k_sum']
+        self.sat_sil = ros_handler_config['sat_sil']
+        self.sat_eig = ros_handler_config['sat_eig']
 
         # Fisher Information Matrix parameters
         self.H_train_inv = None
@@ -63,9 +65,11 @@ class RosHandler:
 
         # Print configuration
         print("ROS Handler Configuration:")
-        print(f"  k_eig: {self.k_fisher}")
+        print(f"  k_eig: {self.k_eig}")
         print(f"  k_sil: {self.k_sil}")
         print(f"  k_sum: {self.k_sum}")
+        print(f"  sat_sil: {self.sat_sil}")
+        print(f"  sat_eig: {self.sat_eig}")
         print(f"  monte_carlo: {self.monte_carlo}")
         print(f"  N_monte_carlo: {self.N_monte_carlo}")
         
@@ -291,28 +295,30 @@ class RosHandler:
                 g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
 
                 # Compute Fisher Information gains
-                if self.k_fisher != 0:
-                    eig = self.compute_eig_score(pose_vec)
-                    g_fisher = eig
-                    loc = 0
+                if self.k_eig != 0:
+                    g_eig = self.compute_eig_score(pose_vec)
                 else:
-                    g_fisher, eig, loc = 0, 0, 0
+                    g_eig = 0
 
                 # Scale gains
                 g_sil *= self.k_sil
-                g_fisher *= self.k_fisher
+                g_eig *= self.k_eig
+
+                # Saturate gains if enabled
+                if self.sat_sil is not None:
+                    g_sil = min(g_sil, self.sat_sil)
+                if self.sat_eig is not None:
+                    g_eig = min(g_eig, self.sat_eig)
 
                 # Compute mixed gains
-                g = self.k_sum * (g_fisher + g_sil)
-                gains.append(g)
+                g_sum = self.k_sum * (g_eig + g_sil)
+                gains.append(g_sum)
 
                 # Gains dictionary
                 gains_dict = {
                     'sil': g_sil,
-                    'eig': eig,
-                    'loc': loc,
-                    'fim': g_fisher,
-                    'gain': g
+                    'eig': g_eig,
+                    'gain': g_sum
                 }
                 gains_arr.append(gains_dict)
 
@@ -335,7 +341,7 @@ class RosHandler:
 
                 if sil_idx == (len(pose_arr) - 1):
                     if self._candidate_viz and rgb_arr and sil_arr and (sil_idx > 0):
-                        self._show_rgb_sil(rgb_arr, sil_arr, pose_arr, gains_arr, mode=2)
+                        self._show_rgb_sil(rgb_arr, sil_arr, pose_arr, gains_arr)
                     sil_arr, rgb_arr  = [], []
         
         # Publish gains
@@ -437,28 +443,30 @@ class RosHandler:
             g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
 
             # Compute Fisher Information gains
-            if self.k_fisher != 0:
-                eig= self.compute_eig_score(trans_pose)
-                g_fisher = eig
-                loc = 0 
+            if self.k_eig != 0:
+                g_eig = self.compute_eig_score(trans_pose)
             else:
-                g_fisher, eig, loc = 0, 0, 0
+                g_eig = 0
             
             # Scale gains
             g_sil *= self.k_sil
-            g_fisher *= self.k_fisher
+            g_eig *= self.k_eig
+
+            # Saturate gains if enabled
+            if self.sat_sil is not None:
+                g_sil = min(g_sil, self.sat_sil)
+            if self.sat_eig is not None:
+                g_eig = min(g_eig, self.sat_eig)
 
             # Compute mixed gains
-            g = 5 * (g_fisher + g_sil)
+            g_sum = 5 * (g_eig + g_sil)
             
             # Store poses with corresponding gains and psnr
             gains_dict = {
                 'pose': pose,
                 'sil': g_sil,
-                'eig': eig,
-                'loc': loc,
-                'fim': g_fisher,
-                'gain': g,
+                'eig': g_eig,
+                'gain': g_sum,
                 'psnr': psnr
             }
             self.gain_psnr_arr.append(gains_dict)
@@ -627,7 +635,7 @@ class RosHandler:
         return next_idx + 1
 
 
-    def _show_rgb_sil(self, rgb_tensor, sil_tensor, pose_arr, gains, mode=1):
+    def _show_rgb_sil(self, rgb_tensor, sil_tensor, pose_arr, gains):
         """
         Draw RGB and SIL images inter-leaved on the shared 4x2 canvas.
         """
@@ -640,7 +648,7 @@ class RosHandler:
             rgb = (rgb_tensor[i].clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
             rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
-            cap = self._make_caption(pose_vec, gains[i], mode)
+            cap = self._make_caption(pose_vec, gains[i])
             tile = self._build_tile(rgb, cap)
             next_idx = self._blit_tile(canvas, next_idx, tile)
 
@@ -655,7 +663,7 @@ class RosHandler:
         cv2.waitKey(1)
 
 
-    def _make_caption(self, pose_vec, gains, mode):
+    def _make_caption(self, pose_vec, gains):
         """Return a short text for the bottom strip."""
         x, y, z = pose_vec[:3]
         yaw = math.degrees(math.atan2(
@@ -663,10 +671,7 @@ class RosHandler:
             1 - 2 * (pose_vec[4] ** 2 + pose_vec[5] ** 2)
         ))
         cap = f"<{x:.2f},{y:.2f},{z:.2f},{yaw:+.0f} deg> G:{gains['gain']:.1f}"
-        if mode == 1:
-            cap += f", FIM:{gains['fim']:.1f}, SIL:{gains['sil']:.1f}"
-        else:
-            cap += f", EIG:{gains['eig']:.1f}, SIL:{gains['sil']:.1f}"
+        cap += f", EIG:{gains['eig']:.1f}, SIL:{gains['sil']:.1f}"
         return cap
 
 

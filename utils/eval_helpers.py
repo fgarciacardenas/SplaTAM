@@ -428,7 +428,6 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         os.makedirs(depth_dir, exist_ok=True)
 
     gt_w2c_list = []
-    global_fim = None
     for time_idx in tqdm(range(num_frames)):
          # Get RGB-D Data & Camera Parameters
         color, depth, intrinsics, pose = dataset[time_idx]

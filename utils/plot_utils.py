@@ -137,19 +137,15 @@ def plot_pose_gains(
         stop  = start + n_per_fig
         chunk = poses_top[start:stop]
 
-        fig, axes = plt.subplots(5, 1, sharex=True, figsize=(12, 12))
+        fig, axes = plt.subplots(3, 1, sharex=True, figsize=(12, 12))
         axes[0].set_title("SIL gains")
         axes[1].set_title("EIG gains")
-        axes[2].set_title("LOC gains")
-        axes[3].set_title("FIM gains")
-        axes[4].set_title("Mixed gains")
-        axes[4].set_xlabel("time step")
+        axes[2].set_title("Mixed gains")
+        axes[2].set_xlabel("Time step")
 
         for pose_key, seq in chunk:
             sil = np.full(T, np.nan)
             eig = np.full(T, np.nan)
-            loc = np.full(T, np.nan)
-            fim = np.full(T, np.nan)
             mix = np.full(T, np.nan)
 
             for t, item in enumerate(seq):
@@ -158,8 +154,6 @@ def plot_pose_gains(
                     continue
                 sil[t] = rec.get("sil",  np.nan)
                 eig[t] = rec.get("eig",  np.nan)
-                loc[t] = rec.get("loc",  np.nan)
-                fim[t] = rec.get("fim",  np.nan)
                 mix[t] = rec.get("gain", np.nan)
 
             label = (
@@ -169,9 +163,7 @@ def plot_pose_gains(
             # Draw marker so even single-point series are visible
             axes[0].plot(x, sil, marker="o", linestyle="-", label=label)
             axes[1].plot(x, eig, marker="o", linestyle="-", label=label)
-            axes[2].plot(x, loc, marker="o", linestyle="-", label=label)
-            axes[3].plot(x, fim, marker="o", linestyle="-", label=label)
-            axes[4].plot(x, mix, marker="o", linestyle="-", label=label)
+            axes[2].plot(x, mix, marker="o", linestyle="-", label=label)
 
         axes[0].legend(fontsize=7, loc="upper right")
 

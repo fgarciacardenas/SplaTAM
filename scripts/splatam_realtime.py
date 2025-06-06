@@ -1072,9 +1072,7 @@ def rgbd_slam(config: dict, ros_handler_config: dict):
     # Plot <value> vs PSNR
     plot_value_psnr(ros_handler.gain_psnr_arr, value="sil", axis_name="SIL", prefix="psnr_sil", save_dir=output_dir + '/psnr_plots')
     plot_value_psnr(ros_handler.gain_psnr_arr, value="eig", axis_name="EIG", prefix="psnr_eig", save_dir=output_dir + '/psnr_plots')
-    plot_value_psnr(ros_handler.gain_psnr_arr, value="loc", axis_name="LOC", prefix="psnr_loc", save_dir=output_dir + '/psnr_plots')
-    plot_value_psnr(ros_handler.gain_psnr_arr, value="fim", axis_name="FIM", prefix="psnr_fim", save_dir=output_dir + '/psnr_plots')
-    plot_value_psnr(ros_handler.gain_psnr_arr, value="gain", axis_name="SUM", prefix="psnr_sum", save_dir=output_dir + '/psnr_plots')
+    plot_value_psnr(ros_handler.gain_psnr_arr, value="gain", axis_name="GAIN", prefix="psnr_gain", save_dir=output_dir + '/psnr_plots')
     plot_combined_psnr(ros_handler.gain_psnr_arr, prefix="psnr_combined", save_dir=output_dir + '/psnr_plots')
 
 
@@ -1082,9 +1080,11 @@ if __name__ == "__main__":
     # Parser arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("experiment", type=str, help="Path to experiment configuration file")
-    parser.add_argument("--k_sil", type=float, help="Scaling factor for silhouette gain", default=300.0)
+    parser.add_argument("--k_sil", type=float, help="Scaling factor for silhouette gain", default=1000.0)
     parser.add_argument("--k_eig", type=float, help="Scaling factor for fisher gain", default=1.0)
-    parser.add_argument("--k_sum", type=float, help="Scaling factor for combined gain", default=5.0)
+    parser.add_argument("--k_sum", type=float, help="Scaling factor for combined gain", default=1.0)
+    parser.add_argument("--sat_sil", type=float, help="Saturation threshold for silhouette gain (default: disabled)", default=None)
+    parser.add_argument("--sat_eig", type=float, help="Saturation threshold for fisher gain (default: disabled)", default=None)
     parser.add_argument("--use_monte", type=bool, help="Flag to enable Monte Carlo approximation", default=True)
     parser.add_argument("--n_monte", type=int, help="Number of iterations for Monte Carlo approximation", default=40)
     parser.add_argument("--run_name", type=str, help="Overrides the experiment's run name", default=None)
@@ -1096,6 +1096,8 @@ if __name__ == "__main__":
         'k_sil': args.k_sil,
         'k_eig': args.k_eig,
         'k_sum': args.k_sum,
+        'sat_sil': args.sat_sil,
+        'sat_eig': args.sat_eig,
         'use_monte': args.use_monte,
         'n_monte': args.n_monte
     }
