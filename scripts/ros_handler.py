@@ -55,7 +55,14 @@ class RosHandler:
         self.k_fisher = 1
         self.k_sil = 300
         self.k_sum = 5
+
+        # Fisher Information Matrix parameters
         self.H_train_inv = None
+        self.monte_carlo = True
+        self.N_monte_carlo = 40
+        
+        # Store visited poses
+        self.visited_poses = []
 
         # Initialize visualization windows
         if self._candidate_viz:
@@ -84,9 +91,6 @@ class RosHandler:
         self.gs_poses = collections.deque(maxlen=max_queue_size)
         self.global_gains = {}
         self.gain_psnr_arr = []
-
-        # Store visited poses
-        self.visited_poses = []
 
         # Queues for synchronization
         self.rgb_queue   = collections.deque(maxlen=max_queue_size)
@@ -721,13 +725,27 @@ class RosHandler:
 
 
     def compute_H_visited_inv(self):
+        """ Compute the inverse of the inverted Hessian matrix for all visited poses """
         H_train = None
-        for pose in self.visited_poses:
-            cur_H = self.compute_Hessian( torch.linalg.inv(pose), return_points=True)
-            if H_train is None:
-                H_train = torch.zeros(*cur_H.shape, device=cur_H.device, dtype=cur_H.dtype)
-            H_train += cur_H
-        
+        num_visited = len(self.visited_poses)
+        selected_poses = None
+
+        #do monte carlo sampling
+        if(self.monte_carlo):
+            if num_visited <= self.N_monte_carlo:
+                selected_poses = self.visited_poses
+            else:
+                indices = np.random.choice(num_visited, size=self.N_monte_carlo, replace=False)
+                selected_poses = [self.visited_poses[i] for i in indices]
+        else:
+            #use all visited poses
+            selected_poses = self.visited_poses
+
+        for pose in selected_poses:
+                cur_H = self.compute_Hessian( torch.linalg.inv(pose), return_points=True)
+                if H_train is None:
+                    H_train = torch.zeros(*cur_H.shape, device=cur_H.device, dtype=cur_H.dtype)
+                H_train += cur_H
         self.H_train_inv = torch.reciprocal(H_train + 0.1)
 
 
