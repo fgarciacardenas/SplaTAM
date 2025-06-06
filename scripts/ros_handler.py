@@ -30,7 +30,7 @@ from utils.plot_utils import _make_canvas, grid_to_cv2, make_occupancy_grid
 
 
 class RosHandler:
-    def __init__(self, config_dict, max_queue_size=5, max_dt=0.08):
+    def __init__(self, config_dict, ros_handler_config, max_queue_size=5, max_dt=0.08):
         # Control flags
         self._verbose = False
         self._dump_data = False
@@ -52,14 +52,22 @@ class RosHandler:
         self.r_cam_to_opt = Rotation.from_quat([-0.5, 0.5, -0.5, 0.5])
 
         # Define gain factors
-        self.k_fisher = 1
-        self.k_sil = 300
-        self.k_sum = 5
+        self.k_fisher = ros_handler_config['k_eig']
+        self.k_sil = ros_handler_config['k_sil']
+        self.k_sum = ros_handler_config['k_sum']
 
         # Fisher Information Matrix parameters
         self.H_train_inv = None
-        self.monte_carlo = True
-        self.N_monte_carlo = 40
+        self.monte_carlo = ros_handler_config['use_monte']
+        self.N_monte_carlo = ros_handler_config['n_monte']
+
+        # Print configuration
+        print("ROS Handler Configuration:")
+        print(f"  k_eig: {self.k_fisher}")
+        print(f"  k_sil: {self.k_sil}")
+        print(f"  k_sum: {self.k_sum}")
+        print(f"  monte_carlo: {self.monte_carlo}")
+        print(f"  N_monte_carlo: {self.N_monte_carlo}")
         
         # Store visited poses
         self.visited_poses = []

@@ -494,7 +494,7 @@ def convert_params_to_store(params):
     return params_to_store
 
 
-def rgbd_slam(config: dict):
+def rgbd_slam(config: dict, ros_handler_config: dict):
     # Print Config
     print("Loaded Config:")
     if "use_depth_loss_thres" not in config['tracking']:
@@ -578,7 +578,7 @@ def rgbd_slam(config: dict):
     num_frames = 1000
 
     # Initialize ROS Node
-    ros_handler = RosHandler(gradslam_data_cfg)
+    ros_handler = RosHandler(gradslam_data_cfg, ros_handler_config)
 
     # Init seperate dataloader for densification if required
     if seperate_densification_res:
@@ -1079,11 +1079,26 @@ def rgbd_slam(config: dict):
 
 
 if __name__ == "__main__":
+    # Parser arguments
     parser = argparse.ArgumentParser()
-
-    parser.add_argument("experiment", type=str, help="Path to experiment file")
-
+    parser.add_argument("experiment", type=str, help="Path to experiment configuration file")
+    parser.add_argument("--k_sil", type=float, help="Scaling factor for silhouette gain", default=300.0)
+    parser.add_argument("--k_eig", type=float, help="Scaling factor for fisher gain", default=1.0)
+    parser.add_argument("--k_sum", type=float, help="Scaling factor for combined gain", default=5.0)
+    parser.add_argument("--use_monte", type=bool, help="Flag to enable Monte Carlo approximation", default=True)
+    parser.add_argument("--n_monte", type=int, help="Number of iterations for Monte Carlo approximation", default=40)
+    parser.add_argument("--run_name", type=str, help="Overrides the experiment's run name", default=None)
+    parser.add_argument("--map_iter", type=int, help="Overrides the experiment's mapping iterations", default=None)
     args = parser.parse_args()
+
+    # Set up ROS Handler configuration
+    ros_handler_config = {
+        'k_sil': args.k_sil,
+        'k_eig': args.k_eig,
+        'k_sum': args.k_sum,
+        'use_monte': args.use_monte,
+        'n_monte': args.n_monte
+    }
 
     experiment = SourceFileLoader(
         os.path.basename(args.experiment), args.experiment
@@ -1092,6 +1107,14 @@ if __name__ == "__main__":
     # Set Experiment Seed
     seed_everything(seed=experiment.config['seed'])
     
+    # Override output directory if specified
+    if args.run_name is not None:
+        experiment.config["run_name"] = args.run_name
+
+    # Override mapping iterations if specified
+    if args.map_iter is not None:
+        experiment.config["mapping"]["num_iters"] = args.map_iter
+
     # Create Results Directory and Copy Config
     results_dir = os.path.join(
         experiment.config["workdir"], experiment.config["run_name"]
@@ -1105,6 +1128,6 @@ if __name__ == "__main__":
 
     # Start RGBD SLAM
     try:
-        rgbd_slam(experiment.config)
+        rgbd_slam(experiment.config, ros_handler_config)
     except rospy.ROSInterruptException:
         print("Caught shutdown request — exiting cleanly")
