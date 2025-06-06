@@ -648,7 +648,10 @@ def rgbd_slam(config: dict, ros_handler_config: dict):
     mapping_frame_time_count = 0
 
     # Initialize dataset
-    dataset = []
+    dataset = [ros_handler.get_first_data()]
+
+    # Compute Hessian for training poses
+    ros_handler.compute_H_visited_inv()
 
     # Iterate over Scan
     print("Initializing SLAM...")
@@ -659,25 +662,22 @@ def rgbd_slam(config: dict, ros_handler_config: dict):
             num_frames = time_idx
             break
 
-        if time_idx == 0:
-            ros_data = ros_handler.get_first_data()
-        else:
-            # Block until ROS trigger fires
-            rospy.logwarn_once("Waiting for trigger...")
+        # Block until ROS trigger fires
+        rospy.logwarn_once("Waiting for trigger...")
 
-            if not ros_handler.triggered:
-                # Check if new silhouette data has been requested
-                ros_handler.send_gains()
-                rospy.sleep(0.01)
-                continue
+        if not ros_handler.triggered:
+            # Check if new silhouette data has been requested
+            ros_handler.send_gains()
+            rospy.sleep(0.01)
+            continue
 
-            # Get new data sample
-            ros_data = ros_handler.get_current_data()
-            if ros_data is None:
-                if ros_handler._verbose:
-                    rospy.logwarn("No ROS data yet, skipping")
-                continue
-            ros_handler.triggered = False
+        # Get new data sample
+        ros_data = ros_handler.get_current_data()
+        if ros_data is None:
+            if ros_handler._verbose:
+                rospy.logwarn("No ROS data yet, skipping")
+            continue
+        ros_handler.triggered = False
 
         # Increment current index
         time_idx += 1
