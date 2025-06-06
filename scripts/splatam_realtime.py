@@ -1000,6 +1000,7 @@ def rgbd_slam(config: dict):
         exit(1)
 
     # Finalize Parameters
+    ros_handler.compute_H_visited_inv()
     params['cam_unnorm_rots'] = params['cam_unnorm_rots'][..., :num_frames]
     params['cam_trans'] = params['cam_trans'][..., :num_frames]
 
@@ -1031,11 +1032,17 @@ def rgbd_slam(config: dict):
             eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
                  wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
                  mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
+                 eval_every=config['eval_every'], ros_handler=ros_handler)
         else:
             eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
                  mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
+                 eval_every=config['eval_every'], ros_handler=ros_handler)
+            
+    # Print statistics before mapping
+    avg_psnr = np.array([g["psnr"] for g in ros_handler.gain_psnr_arr]).mean()
+    avg_eig = np.array([g["eig"] for g in ros_handler.gain_psnr_arr]).mean()
+    print("Average PSNR (before mapping): {:.2f}".format(avg_psnr))
+    print("Average EIG (before mapping): {:.2f}".format(avg_eig))
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']

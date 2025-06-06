@@ -283,13 +283,10 @@ class RosHandler:
                 g_sil /= (cam_data['cam'].image_width * cam_data['cam'].image_height)
 
                 # Compute Fisher Information gains
-
-                #for now fish only EIG
                 if self.k_fisher != 0:
-                    #gradient already enabled in compute hessian def
-                    eig= self.compute_eig_score(pose_vec)
+                    eig = self.compute_eig_score(pose_vec)
                     g_fisher = eig
-                    loc = 0 
+                    loc = 0
                 else:
                     g_fisher, eig, loc = 0, 0, 0
 
@@ -725,7 +722,7 @@ class RosHandler:
 
 
     def compute_H_visited_inv(self):
-        """ Compute the inverse of the inverted Hessian matrix for all visited poses """
+        """Compute the inverse of the inverted Hessian matrix for all visited poses."""
         H_train = None
         num_visited = len(self.visited_poses)
         selected_poses = None
@@ -750,35 +747,31 @@ class RosHandler:
 
 
     def compute_eig_score(self, pose):
-        """ Compute pose scores for the poses """
-        # Compute Hessian want w2c
-        cur_H = self.compute_Hessian( torch.linalg.inv(pose), return_points=True)
-        print("cur_H shape: ", cur_H.shape)
-
-        view_score = torch.sum(cur_H * self.H_train_inv).item() 
-        print("EIG: ", view_score)
-
+        """Compute pose scores for the poses (w2c)."""
+        cur_H = self.compute_Hessian(torch.linalg.inv(pose), return_points=True)
+        view_score = torch.sum(cur_H * self.H_train_inv).item()
         return view_score
 
 
     @torch.enable_grad()
-    def compute_Hessian(self, rel_w2c, return_points = False, 
-                        return_pose = False):
-        """
-            Compute uncertainty at candidate pose
-                params: Gaussian slam params
-                candidate_trans: (3, )
-                candidate_rot: (4, )
-                return_points:
-                    if True, then the Hessian matrix is returned in shape (N, C), 
-                    else, it is flatten in 1-D.
-
+    def compute_Hessian(self, rel_w2c, return_points = False, return_pose = False):
+        """Compute uncertainty at candidate pose
+            
+        Args:
+            params: Gaussian slam params
+            candidate_trans: (3,)
+            candidate_rot: (4,)
+            return_pose: if True, return the Hessian matrix with shape (N, C)
+        
+        Returns:
+            if return_pose is True, the Hessian matrix is returned with shape (N, C), 
+            else, it is flatten to 1-D.
         """
         if isinstance(rel_w2c, np.ndarray):
             rel_w2c = torch.from_numpy(rel_w2c).cuda()
         rel_w2c = rel_w2c.float()
 
-        # transform to candidate frame
+        # Transform to candidate frame
         with torch.no_grad():
             pts = self.params['means3D']
             pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
@@ -803,7 +796,7 @@ class RosHandler:
             'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
         }
 
-        # for means3D, rotation won't change sum of square since R^T R = I
+        # For means3D, rotation won't change sum of square since R^T R = I
         rendervar['means2D'].retain_grad()
         im, _, _, = Renderer(raster_settings=self.cam, backward_power=2)(**rendervar)
         im.backward(gradient=torch.ones_like(im) * 1e-3)
@@ -816,7 +809,7 @@ class RosHandler:
             cur_H = torch.cat([transformed_pts.grad.detach().reshape(-1), 
                                 opacities.grad.detach().reshape(-1)])
             
-        # set grad to zero
+        # Set grad to zero
         for k, v in rendervar.items():
             v.grad.fill_(0.)
 
