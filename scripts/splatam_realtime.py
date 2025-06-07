@@ -430,7 +430,14 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     gt_depth = curr_data['depth'][0, :, :]
     render_depth = depth_sil[0, :, :]
     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
+    print(f"Depth Error Median: {depth_error.median().item()}")
+    median_depth = None
+    if depth_error.median()> 0.1 :
+        median_depth = 0.1
+    else:
+        median_depth = depth_error.median()
+
+    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 2*median_depth)
     # Determine non-presence mask
     non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
     # Flatten mask
