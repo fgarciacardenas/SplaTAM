@@ -566,7 +566,7 @@ class RosHandler:
             else:
                 if arr.dtype != np.uint8:
                     maxv = arr.max()
-                    if maxv <= 1.0:
+                    if maxv <= 2.0:
                         arr = (arr * 255)
                     arr = arr.clip(0, 255).astype(np.uint8)
                 
