@@ -428,8 +428,8 @@ class RosHandler:
         # Store camera parameters
         cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
 
-        # Optional: Visualize the Silhouette and RGB render
-        if self._current_viz and (self.params is not None):
+        # Compute PSNR and gains        
+        if (self.params is not None):
             # Process RGB-D Data
             post_color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
             post_depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
@@ -480,11 +480,12 @@ class RosHandler:
             }
             self.gain_psnr_arr.append(gains_dict)
 
-            # Plot previous renders and new view
-            self.plot_renders(rgb_render, sil, color, gains_dict)
-
         if self.first_dataframe is None:
             self.first_dataframe = (color, depth, intrinsics, trans_pose)
+
+        # Optional: Visualize the Silhouette and RGB render
+        if self._current_viz:
+            self.plot_renders(rgb_render, sil, color, gains_dict)
 
         # Optional: Visualize bird's-eye view
         if self._bird_viz and (self.params is not None):
