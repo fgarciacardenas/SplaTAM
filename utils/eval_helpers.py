@@ -122,15 +122,15 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
     axs[0, 1].set_title("Ground Truth Depth")
     rastered_color = torch.clamp(rastered_color, 0, 1)
     axs[1, 0].imshow(rastered_color.cpu().permute(1, 2, 0))
-    axs[1, 0].set_title("Rasterized RGB, PSNR: {:.2f}".format(psnr))
+    axs[1, 0].set_title("Render RGB, PSNR: {:.2f}".format(psnr))
     axs[1, 1].imshow(rastered_depth[0, :, :].cpu(), cmap='jet', vmin=0, vmax=6)
-    axs[1, 1].set_title("Rasterized Depth, L1: {:.2f}".format(depth_l1))
+    axs[1, 1].set_title("Render Depth, L1: {:.2f}".format(depth_l1))
     if diff_rgb is not None:
         axs[0, 2].imshow(diff_rgb.cpu(), cmap='jet', vmin=0, vmax=6)
         axs[0, 2].set_title("Diff RGB L1")
     else:
         axs[0, 2].imshow(presence_sil_mask, cmap='gray')
-        axs[0, 2].set_title("Rasterized Silhouette")
+        axs[0, 2].set_title("Render Silhouette")
     diff_depth_l1 = diff_depth_l1.cpu().squeeze(0)
     axs[1, 2].imshow(diff_depth_l1, cmap='jet', vmin=0, vmax=6)
     axs[1, 2].set_title("Diff Depth L1")

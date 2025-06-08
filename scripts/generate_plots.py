@@ -5,10 +5,10 @@ import argparse
 import numpy as np
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BASE_DIR)
-from utils.plot_utils import plot_value_psnr, plot_combined_psnr
+from utils.plot_utils import plot_value_psnr, plot_combined_psnr, plot_eig_psnr_slice
 
 
-def main(dpath: str):
+def main(dpath: str, thr: float = 200.0) -> None:
     # Read the file, skipping the header row we wrote earlier
     fname = glob.glob(dpath + '/running_metrics_*')[0]
     data = np.loadtxt(fname, delimiter=",", skiprows=1)
@@ -24,11 +24,13 @@ def main(dpath: str):
     plot_value_psnr(psnr_list, eig_list, axis_name="EIG", prefix="psnr_eig", save_dir=dpath + '/psnr_plots')
     plot_value_psnr(psnr_list, gain_list, axis_name="GAIN", prefix="psnr_gain", save_dir=dpath + '/psnr_plots')
     plot_combined_psnr(psnr_list, sil_list, eig_list, prefix="psnr_combined", save_dir=dpath + '/psnr_plots')
+    plot_eig_psnr_slice(psnr_list, eig_list, sil_list, thr=thr, axis_name="EIG", prefix="psnr_eig", save_dir=dpath + '/psnr_plots')
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reload and display a saved figure.")
     parser.add_argument("dpath", type=str, help="Path to the stored data file.")
+    parser.add_argument("--thr", type=float, help="Threshold for EIG vs PSNR sliced plot.")
     args = parser.parse_args()
-    main(args.dpath)
+    main(args.dpath, args.thr)
     

@@ -203,6 +203,40 @@ def plot_value_psnr(
     plt.close(fig)
 
 
+def plot_eig_psnr_slice(
+    psnr_arr: list,
+    eig_arr: list,
+    sil_arr: list,
+    thr: float = 100.0,
+    axis_name: str = "EIG",
+    save_dir: str = "/home/dev/splatam/experiments/",
+    prefix: str = "psnr_eig",
+) -> None:
+    """
+    Plot <value> vs PSNR.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Retrieve indexes where silhouette is lower than threshold
+    sil_mask = np.array(sil_arr) < thr
+
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.scatter(psnr_arr[sil_mask], eig_arr[sil_mask], alpha=0.8)
+    ax.set_xlabel("PSNR")
+    ax.set_ylabel(f"{axis_name}")
+    ax.set_title(f"{axis_name} vs PSNR")
+
+    ax.dataLim.update_from_data_xy(np.column_stack([psnr_arr, eig_arr]))
+    ax.autoscale_view()
+
+    # Save the figure
+    fig.tight_layout()
+    fname = os.path.join(save_dir, f"{prefix}_{time.time_ns()}_sliced.pdf")
+    fig.savefig(fname, format="pdf", bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+
+
 def plot_combined_psnr(
     psnr_values: list,
     sil_values: list,
