@@ -255,7 +255,8 @@ def initialize_first_timestep(ros_handler, num_frames, scene_radius_depth_ratio,
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
+             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, 
+             tracking_iteration=None, median_thr = None, median_scale = 50):
     # Initialize Loss Dictionary
     losses = {}
 
@@ -304,7 +305,14 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
     if ignore_outlier_depth_loss:
         depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
-        mask = (depth_error < 10*depth_error.median())
+
+        # Determine median depth error
+        if (median_thr is not None) and (depth_error.median() > median_thr):
+            median_depth = median_thr
+        else:
+            median_depth = depth_error.median()
+
+        mask = (depth_error < (median_scale/5)*median_depth)
         mask = mask & (curr_data['depth'] > 0)
     else:
         mask = (curr_data['depth'] > 0)
@@ -747,7 +755,8 @@ def rgbd_slam(config: dict, ros_handler_config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter)
+                                                   tracking_iteration=iter, median_thr=config['mapping']['median_thr'],
+                                                   median_scale=config['mapping']['median_scale'])
                 if config['use_wandb']:
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
@@ -900,8 +909,9 @@ def rgbd_slam(config: dict, ros_handler_config: dict):
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+                                                   config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
+                                                   config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True,
+                                                   median_thr=config['mapping']['median_thr'], median_scale=config['mapping']['median_scale'])
                 if config['use_wandb']:
                     # Report Loss
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
@@ -1113,7 +1123,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, help="Overrides the experiment's run name", default=None)
     parser.add_argument("--map_iter", type=int, help="Overrides the experiment's mapping iterations", default=None)
     parser.add_argument("--median_thr", type=float, help="Median-based threshold for gaussian generation", default=None)
-    parser.add_argument("--median_scale", type=float, help="Scaling factor for the median-based threshold", default=2.0)
+    parser.add_argument("--median_scale", type=float, help="Scaling factor for the median-based threshold", default=50.0)
     args = parser.parse_args()
 
     # Set up ROS Handler configuration
