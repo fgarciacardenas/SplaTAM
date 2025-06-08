@@ -1039,10 +1039,16 @@ def rgbd_slam(config: dict, ros_handler_config: dict):
                  eval_every=config['eval_every'], ros_handler=ros_handler)
             
     # Print statistics before mapping
-    avg_psnr = np.array([g["psnr"] for g in ros_handler.gain_psnr_arr]).mean()
-    avg_eig = np.array([g["eig"] for g in ros_handler.gain_psnr_arr]).mean()
+    psnr_list = np.array([g["psnr"] for g in ros_handler.gain_psnr_arr])
+    eig_list = np.array([g["eig"] for g in ros_handler.gain_psnr_arr])
+    sil_list = np.array([g["sil"] for g in ros_handler.gain_psnr_arr])
+    
+    avg_psnr = psnr_list.mean()
+    avg_eig  = eig_list.mean()
+    avg_sil  = sil_list.mean()
     print("Average PSNR (before mapping): {:.2f}".format(avg_psnr))
     print("Average EIG (before mapping): {:.2f}".format(avg_eig))
+    print("Average SIL (before mapping): {:.2f}".format(avg_sil))
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']
@@ -1074,6 +1080,11 @@ def rgbd_slam(config: dict, ros_handler_config: dict):
     plot_value_psnr(ros_handler.gain_psnr_arr, value="eig", axis_name="EIG", prefix="psnr_eig", save_dir=output_dir + '/psnr_plots')
     plot_value_psnr(ros_handler.gain_psnr_arr, value="gain", axis_name="GAIN", prefix="psnr_gain", save_dir=output_dir + '/psnr_plots')
     plot_combined_psnr(ros_handler.gain_psnr_arr, prefix="psnr_combined", save_dir=output_dir + '/psnr_plots')
+
+    # Store averages before mapping
+    np.savetxt(f"{output_dir}/running_metrics_{time.time_ns()}.csv",
+               np.column_stack((sil_list, eig_list, psnr_list)),
+               delimiter=",", header="sil,eig,psnr", comments="")
 
 
 if __name__ == "__main__":
