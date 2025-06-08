@@ -360,14 +360,14 @@ renderCUDA(
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
-            // Mean depth:
-//             float dep = collected_depth[j];
-//             D += dep * alpha * T;
+			// Mean depth:
+			// float dep = collected_depth[j];
+			// D += dep * alpha * T;
 
-            // Median depth:
-            if (T > 0.5f && test_T < 0.5)
+			// Median depth:
+			if (T > 0.5f && test_T < 0.5)
 			{
-			    float dep = collected_depth[j];
+				float dep = collected_depth[j];
 				D = dep;
 			}
 
