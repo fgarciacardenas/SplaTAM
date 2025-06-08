@@ -1081,7 +1081,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("experiment", type=str, help="Path to experiment configuration file")
     parser.add_argument("--k_sil", type=float, help="Scaling factor for silhouette gain", default=1000.0)
-    parser.add_argument("--k_eig", type=float, help="Scaling factor for fisher gain", default=1.0)
+    parser.add_argument("--k_eig", type=float, help="Scaling factor for fisher gain", default=0.1)
     parser.add_argument("--k_sum", type=float, help="Scaling factor for combined gain", default=1.0)
     parser.add_argument("--nl_sil", action='store_true', help="Flag to enable non-linear activation for silhouette gain")
     parser.add_argument("--nl_eig", action='store_true', help="Flag to enable non-linear activation for fisher gain")

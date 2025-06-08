@@ -11,6 +11,7 @@ import cv2
 import pickle
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.colors import Normalize
 
 
 def _make_canvas(cols, rows, cell_w, cell_h, text_h, pad):
@@ -215,7 +216,7 @@ def plot_combined_psnr(
     prefix: str = "psnr_combined",
 ) -> None:
     """
-    Plot combined values vs PSNR.
+    Plot SIL and EIG against PSNR, with points colour-graded by EIG (“height”).
     """
     if not gains_arr:
         print("plot_comb_psnr: nothing to plot.")
@@ -230,17 +231,28 @@ def plot_combined_psnr(
     # Create 3D plot
     fig = plt.figure(figsize=(10, 6))
     ax  = fig.add_subplot(111, projection="3d")
-    ax.scatter(psnr_values, sil_values, eig_values, alpha=0.8)
+
+    # Colour-grade by EIG
+    norm    = Normalize(vmin=min(eig_values), vmax=max(eig_values))
+    scatter = ax.scatter(psnr_values, sil_values, eig_values,
+                         c=eig_values, cmap="viridis", norm=norm,
+                         alpha=0.85, edgecolors="k", linewidths=0.2)
+
     ax.set_xlabel("PSNR")
     ax.set_ylabel("SIL")
     ax.set_zlabel("EIG")
     ax.set_title("SIL vs EIG vs PSNR")
 
+    # Add colour-bar so the mapping is obvious
+    cbar = fig.colorbar(scatter, ax=ax, pad=0.06)
+    cbar.set_label("EIG (colour-mapped)")
+
     # Save the figure
-    fig.savefig(os.path.join(save_dir, f"{prefix}_{time.time_ns()}.png"), dpi=300)
+    img_name = f"{prefix}_{time.time_ns()}"
+    fig.savefig(os.path.join(save_dir, img_name+".png"), dpi=300)
 
     # Save pickled figure
-    pkl_name = os.path.join(save_dir, f"{prefix}_{time.time_ns()}.fig.pkl")
+    pkl_name = os.path.join(save_dir, img_name+".fig.pkl")
     with open(pkl_name, "wb") as f:
         pickle.dump(fig, f)
     plt.close(fig)
