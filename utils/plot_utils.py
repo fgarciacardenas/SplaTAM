@@ -244,7 +244,7 @@ def plot_combined_psnr(
     ax.set_title("SIL vs EIG vs PSNR")
 
     # Add colour-bar so the mapping is obvious
-    cbar = fig.colorbar(scatter, ax=ax, pad=0.06)
+    cbar = fig.colorbar(scatter, ax=ax, pad=0.08)
     cbar.set_label("EIG (colour-mapped)")
 
     # Save the figure
