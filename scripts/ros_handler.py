@@ -491,7 +491,7 @@ class RosHandler:
         if self._bird_viz and (self.params is not None):
             with torch.no_grad():
                 # Transform Gaussians from world frame to camera frame
-                transformed_gaussians = transform_gaussians(self.params, self.bird_pose, requires_grad = False)
+                transformed_gaussians = transform_gaussians(self.params, self.bird_pose, requires_grad = False, bird_view=True)
 
                 # Initialize Render Variables
                 rendervar = transformed_params2rendervar(self.params, transformed_gaussians)
@@ -903,7 +903,7 @@ class RosHandler:
         
 
 def transform_gaussians(params: dict, cam_pose: torch.Tensor,
-                        requires_grad: bool = False) -> dict:
+                        requires_grad: bool = False, bird_view: bool = False) -> dict:
     """
     Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
     
@@ -925,7 +925,10 @@ def transform_gaussians(params: dict, cam_pose: torch.Tensor,
     # Get Centers and Unnorm Rots of Gaussians in World Frame
     pts = params['means3D']
     unnorm_rots = params['unnorm_rotations']
-
+    if bird_view:
+        # Vectorized operation - much faster than loop
+        mask = pts[:, 1] < -1.5
+        pts[mask, 1] =  -12.0  #
     # Detach or keep gradients
     if not requires_grad:
         pts = pts.detach()
