@@ -36,8 +36,15 @@ class RosHandler:
         self._dump_data = False
         self._stream_viz = False
         self._grid_viz = False       # Show XY occupancy grid
-        self._current_viz = True     # Show current frame render image
+        self._current_viz = False    # Show current frame render image
         self._candidate_viz = False  # Show Silhouette and RGB renders
+        self._bird_viz = False       # Show bird's-eye view of the current render
+
+        # Generate bird's-eye view of the RGB render
+        self.bird_pose = torch.tensor([[1., 0., 0.,  0.],
+                                       [0., 0.,-1.,  0.],
+                                       [0., 1., 0., 10.],
+                                       [0., 0., 0.,  1.]], device='cuda')
         
         # Parameters
         self.max_dt = max_dt
@@ -418,6 +425,9 @@ class RosHandler:
         if self._stream_viz:
             self.plot_images(color, depth)
 
+        # Store camera parameters
+        cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
+
         # Optional: Visualize the Silhouette and RGB render
         if self._current_viz and (self.params is not None):
             # Process RGB-D Data
@@ -425,7 +435,6 @@ class RosHandler:
             post_depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
             
             # Generate Silhouette and RGB renders (before mapping)
-            cam_data = {'cam': self.cam, 'w2c': self.w2c_ref}
             sil, rgb_render = get_renders(self.params, torch.linalg.inv(trans_pose), cam_data)
             
             # Mask invalid depth in GT
@@ -476,6 +485,18 @@ class RosHandler:
 
         if self.first_dataframe is None:
             self.first_dataframe = (color, depth, intrinsics, trans_pose)
+
+        # Optional: Visualize bird's-eye view
+        if self._bird_viz and (self.params is not None):
+            with torch.no_grad():
+                # Transform Gaussians from world frame to camera frame
+                transformed_gaussians = transform_gaussians(self.params, self.bird_pose, requires_grad = False)
+
+                # Initialize Render Variables
+                rendervar = transformed_params2rendervar(self.params, transformed_gaussians)
+                bird_render, _, _, = Renderer(raster_settings=cam_data['cam'])(**rendervar)
+
+            self.plot_birdseye(bird_render)
 
         # Append visited pose
         self.visited_poses.append(trans_pose.cuda())
@@ -603,8 +624,56 @@ class RosHandler:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                     (0, 255, 0), 2, cv2.LINE_AA)
 
-        # Show & return
+        # Show image
         cv2.imshow("Current View", canvas)
+        cv2.waitKey(1)
+
+    
+    def plot_birdseye(self, rgb_render):
+        """
+        Visualize a bird's-eye view of the RGB render.
+        """
+        # Helper: Tensor/np-array to BGR uint8
+        def _to_bgr_u8(t):
+            """Handle (C,H,W) or (H,W) tensors / numpy; output BGR uint8."""
+            if torch.is_tensor(t):
+                arr = t.detach().cpu()
+                if arr.ndim == 3:
+                    if arr.shape[0] in (3, 4):
+                        arr = arr.permute(1, 2, 0)
+                    arr = arr.numpy()
+                else:
+                    arr = arr.numpy()
+            else:
+                arr = t
+
+            # Convert grayscale to BGR
+            if arr.ndim == 2:
+                arr = (arr < 0.5).astype(np.uint8) * 255
+                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+            else:
+                if arr.dtype != np.uint8:
+                    maxv = arr.max()
+                    if maxv <= 2.0:
+                        arr = (arr * 255)
+                    arr = arr.clip(0, 255).astype(np.uint8)
+                
+                # RGB to BGR for OpenCV
+                if arr.shape[2] == 3:
+                    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            return arr
+
+        # Convert RGB render to BGR uint8
+        img_render = _to_bgr_u8(rgb_render)
+
+        # Header text
+        title = ("Bird's-eye View")
+        cv2.putText(img_render, title, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (0, 255, 0), 2, cv2.LINE_AA)
+
+        # Show image
+        cv2.imshow("Bird View", img_render)
         cv2.waitKey(1)
 
 
