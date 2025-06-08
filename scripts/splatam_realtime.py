@@ -418,7 +418,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
 
 
 def add_new_gaussians(params, variables, curr_data, sil_thres, 
-                      time_idx, mean_sq_dist_method, gaussian_distribution, median_thr = 0.1, median_scale = 2):
+                      time_idx, mean_sq_dist_method, gaussian_distribution, median_thr = None, median_scale = 50):
     # Silhouette Rendering
     transformed_gaussians = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
@@ -430,9 +430,9 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     gt_depth = curr_data['depth'][0, :, :]
     render_depth = depth_sil[0, :, :]
     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    print(f"Depth Error Median: {depth_error.median().item()}")
-    median_depth = None
-    if depth_error.median() > median_thr:
+    
+    # Determine median depth error
+    if (median_thr is not None) and (depth_error.median() > median_thr):
         median_depth = median_thr
     else:
         median_depth = depth_error.median()
@@ -1109,7 +1109,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_monte", type=int, help="Number of iterations for Monte Carlo approximation", default=40)
     parser.add_argument("--run_name", type=str, help="Overrides the experiment's run name", default=None)
     parser.add_argument("--map_iter", type=int, help="Overrides the experiment's mapping iterations", default=None)
-    parser.add_argument("--median_thr", type=float, help="Median-based threshold for gaussian generation", default=0.1)
+    parser.add_argument("--median_thr", type=float, help="Median-based threshold for gaussian generation", default=None)
     parser.add_argument("--median_scale", type=float, help="Scaling factor for the median-based threshold", default=2.0)
     args = parser.parse_args()
 
@@ -1139,6 +1139,10 @@ if __name__ == "__main__":
     if args.map_iter is not None:
         experiment.config["mapping"]["num_iters"] = args.map_iter
 
+    # Append median arguments to SPLATAM config
+    experiment.config['mapping']['median_thr'] = args.median_thr
+    experiment.config['mapping']['median_scale'] = args.median_scale
+
     # Create Results Directory and Copy Config
     results_dir = os.path.join(
         experiment.config["workdir"], experiment.config["run_name"]
@@ -1149,10 +1153,6 @@ if __name__ == "__main__":
 
     # Set up ROS subscribers
     rospy.init_node('ifpp_3dgs')
-
-    # Append arguments to SPLATAM config
-    experiment.config['mapping']['median_thr'] = args.median_thr
-    experiment.config['mapping']['median_scale'] = args.median_scale
 
     # Start RGBD SLAM
     try:
