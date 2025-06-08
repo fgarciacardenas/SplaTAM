@@ -178,8 +178,8 @@ def plot_pose_gains(
 
 
 def plot_value_psnr(
-    gains_arr: list,
-    value: str = "eig",
+    x_arr: list,
+    y_arr: list,
     axis_name: str = "EIG",
     save_dir: str = "/home/dev/splatam/experiments/",
     prefix: str = "psnr_eig",
@@ -189,44 +189,31 @@ def plot_value_psnr(
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    if not gains_arr:
-        print("plot_<value>_psnr: nothing to plot.")
-        return
-
-    # Extract <value> and PSNR values
-    values = [g[value] for g in gains_arr]
-    psnr_values = [g["psnr"] for g in gains_arr]
-
     # Create the plot
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(psnr_values, values, alpha=0.8)
+    ax.scatter(x_arr, y_arr, alpha=0.8)
     ax.set_xlabel("PSNR")
     ax.set_ylabel(f"{axis_name}")
     ax.set_title(f"{axis_name} vs PSNR")
 
     # Save the figure
-    fname = os.path.join(save_dir, f"{prefix}_{time.time_ns()}.png")
-    fig.savefig(fname, dpi=300)
+    fig.tight_layout()
+    fname = os.path.join(save_dir, f"{prefix}_{time.time_ns()}.pdf")
+    fig.savefig(fname, format="pdf", bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
 
 
 def plot_combined_psnr(
-    gains_arr: list,
+    psnr_values: list,
+    sil_values: list,
+    eig_values: list,
     save_dir: str = "/home/dev/splatam/experiments/",
     prefix: str = "psnr_combined",
 ) -> None:
     """
     Plot SIL and EIG against PSNR, with points colour-graded by EIG (“height”).
     """
-    if not gains_arr:
-        print("plot_comb_psnr: nothing to plot.")
-        return
     os.makedirs(save_dir, exist_ok=True)
-
-    # Extract data
-    sil_values  = [g["sil"]  for g in gains_arr]
-    eig_values  = [g["eig"]  for g in gains_arr]
-    psnr_values = [g["psnr"] for g in gains_arr]
 
     # Create 3D plot
     fig = plt.figure(figsize=(10, 6))
@@ -248,8 +235,10 @@ def plot_combined_psnr(
     cbar.set_label("EIG (colour-mapped)")
 
     # Save the figure
+    fig.tight_layout()
     img_name = f"{prefix}_{time.time_ns()}"
-    fig.savefig(os.path.join(save_dir, img_name+".png"), dpi=300)
+    fig.savefig(os.path.join(save_dir, img_name+".pdf"),
+                format="pdf", bbox_inches="tight", pad_inches=0.02)
 
     # Save pickled figure
     pkl_name = os.path.join(save_dir, img_name+".fig.pkl")
