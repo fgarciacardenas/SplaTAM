@@ -47,6 +47,7 @@ def save_ply(path, means, scales, rotations, rgbs, opacities, normals=None):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, help="Path to config file.")
+    parser.add_argument("--run_name", type=str, help="Overrides the experiment's run name", default=None)
     return parser.parse_args()
 
 
@@ -55,6 +56,11 @@ if __name__ == "__main__":
 
     # Load SplaTAM config
     experiment = SourceFileLoader(os.path.basename(args.config), args.config).load_module()
+    
+    # Override output directory if specified
+    if args.run_name is not None:
+        experiment.config["run_name"] = args.run_name
+    
     config = experiment.config
     work_path = config['workdir']
     run_name = config['run_name']
