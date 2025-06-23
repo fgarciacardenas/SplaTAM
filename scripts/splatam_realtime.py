@@ -311,6 +311,8 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
             median_depth = median_thr
         else:
             median_depth = depth_error.median()
+            if(median_thr is not None):
+                median_scale = 10 # Default median scale
 
         mask = (depth_error < (median_scale/5)*median_depth)
         mask = mask & (curr_data['depth'] > 0)
@@ -443,7 +445,10 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     if (median_thr is not None) and (depth_error.median() > median_thr):
         median_depth = median_thr
     else:
+        # Default median scale
         median_depth = depth_error.median()
+        if(median_thr is not None):
+            median_scale = 50 # Default median scale
 
     non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > median_scale*median_depth)
     # Determine non-presence mask

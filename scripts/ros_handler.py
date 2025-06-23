@@ -468,7 +468,7 @@ class RosHandler:
                 g_eig = (3400 / (1 + math.exp(-0.002*g_eig))) - 1700
 
             # Compute mixed gains
-            g_sum = 5 * (g_eig + g_sil)
+            g_sum = self.k_sum * (g_eig + g_sil)
             
             # Store poses with corresponding gains and psnr
             gains_dict = {
